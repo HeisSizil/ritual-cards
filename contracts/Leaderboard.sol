@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.28;
 
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+
 /// @notice Tracks win counts per address, updatable only by an approved
 ///         caller contract (e.g. WhotGame), so wins can't be self-reported.
-contract Leaderboard {
-  // Can update authorizedCaller. Set to the deployer at construction.
-  address public owner;
-
+contract Leaderboard is Ownable {
   // The only address allowed to call recordWin (e.g. a WhotGame contract).
   address public authorizedCaller;
 
@@ -15,23 +14,14 @@ contract Leaderboard {
 
   event WinRecorded(address indexed winner, uint256 newTotal);
 
-  error NotOwner();
   error NotAuthorizedCaller();
   error ZeroAddress();
 
-  modifier onlyOwner() {
-    if (msg.sender != owner) {
-      revert NotOwner();
-    }
-    _;
-  }
-
-  constructor(address initialAuthorizedCaller) {
+  constructor(address initialAuthorizedCaller) Ownable(msg.sender) {
     if (initialAuthorizedCaller == address(0)) {
       revert ZeroAddress();
     }
 
-    owner = msg.sender;
     authorizedCaller = initialAuthorizedCaller;
   }
 

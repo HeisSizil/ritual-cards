@@ -104,9 +104,9 @@ describe("Leaderboard", function () {
     it("Should revert setAuthorizedCaller if called by a non-owner", async function () {
       const { leaderboard, other } = await loadFixture(deployLeaderboardFixture);
 
-      await expect(
-        leaderboard.connect(other).setAuthorizedCaller(other.address),
-      ).to.be.revertedWithCustomError(leaderboard, "NotOwner");
+      await expect(leaderboard.connect(other).setAuthorizedCaller(other.address))
+        .to.be.revertedWithCustomError(leaderboard, "OwnableUnauthorizedAccount")
+        .withArgs(other.address);
     });
 
     it("Should revert setAuthorizedCaller with the zero address", async function () {
