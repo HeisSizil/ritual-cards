@@ -9,11 +9,23 @@ const SUIT_NUMBERS: Record<Exclude<WhotSuit, "Whot">, number[]> = {
   Star: [1, 2, 3, 4, 5, 7, 8],
 };
 
+// Star suit cards carry a paired second number a Star card can also match against.
+const STAR_SECOND_NUMBERS: Record<number, number> = {
+  1: 2,
+  2: 4,
+  3: 6,
+  4: 8,
+  5: 10,
+  7: 14,
+  8: 16,
+};
+
 export function buildWhotDeck(): WhotCard[] {
   const cards: WhotCard[] = [];
   (Object.keys(SUIT_NUMBERS) as Array<Exclude<WhotSuit, "Whot">>).forEach((suit) => {
     SUIT_NUMBERS[suit].forEach((number) => {
-      cards.push({ id: `${suit}-${number}`, suit, number });
+      const secondNumber = suit === "Star" ? STAR_SECOND_NUMBERS[number] : undefined;
+      cards.push({ id: `${suit}-${number}`, suit, number, ...(secondNumber !== undefined ? { secondNumber } : {}) });
     });
   });
   for (let i = 0; i < 5; i++) {

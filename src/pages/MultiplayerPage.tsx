@@ -3,6 +3,7 @@ import type { RealtimeChannel } from "@supabase/supabase-js";
 import { UsernameGate } from "@/components/UsernameGate";
 import { ResultOverlay } from "@/components/ResultOverlay";
 import { WhotCardView, CardBackView } from "@/components/cards/WhotCardView";
+import { WhotIntro } from "@/components/whot/WhotIntro";
 import { useUsername } from "@/context/UsernameContext";
 import { supabase, generateRoomCode, getPersistentPlayerId } from "@/lib/supabase";
 import { recordMatch } from "@/lib/storage";
@@ -12,17 +13,26 @@ import { chooseWhotMove, pickSuitToCall, shouldPlayDrawnCard } from "@/games/who
 import { REAL_SUITS } from "@/games/whot/types";
 import type { WhotGameState, WhotPlayer, WhotSuit } from "@/games/whot/types";
 
-type Seat = WhotPlayer; // reuse "player"/"ai" as generic seat labels — both are human seats here
+type SeatId = WhotPlayer;
+
+interface SeatInfo {
+  id: SeatId;
+  playerId: string;
+  name: string;
+}
 
 interface RoomState {
-  game: WhotGameState;
-  aiAssist: Record<Seat, boolean>;
-  aiProfile: Record<Seat, StrategyProfile>;
-  names: Record<Seat, string>;
+  seats: SeatInfo[];
+  hostPlayerId: string;
+  game: WhotGameState | null; // null while the room is still in the lobby
+  aiAssist: Record<SeatId, boolean>;
+  aiProfile: Record<SeatId, StrategyProfile>;
 }
 
 const WAGER = 0.5;
 const AI_ASSIST_MOVE_DELAY = 2500;
+const MIN_PLAYERS = 2;
+const MAX_PLAYERS = 10;
 
 export function MultiplayerPage() {
   return (
@@ -43,7 +53,7 @@ function MultiplayerContainer() {
 
   const [roomId, setRoomId] = useState<string | null>(null);
   const [roomCode, setRoomCode] = useState("");
-  const [mySeat, setMySeat] = useState<Seat>("player");
+  const [mySeatId, setMySeatId] = useState<SeatId>("seat-0");
   const [status, setStatus] = useState<"waiting" | "active" | "finished">("waiting");
   const [room, setRoom] = useState<RoomState | null>(null);
   const channelRef = useRef<RealtimeChannel | null>(null);
@@ -77,19 +87,21 @@ function MultiplayerContainer() {
     setError("");
     try {
       const code = generateRoomCode();
+      const hostSeat: SeatInfo = { id: "seat-0", playerId, name: username ?? "Player 1" };
       const initialRoom: RoomState = {
-        game: createWhotGame(),
-        aiAssist: { player: false, ai: false },
-        aiProfile: { player: "balanced", ai: "balanced" },
-        names: { player: username ?? "Player 1", ai: "" },
+        seats: [hostSeat],
+        hostPlayerId: playerId,
+        game: null,
+        aiAssist: {},
+        aiProfile: {},
       };
       const { data, error: err } = await supabase
         .from("games")
         .insert({
           room_code: code,
           game_type: "whot",
-          player1_id: playerId,
-          player2_id: null,
+          player_ids: [playerId],
+          max_players: MAX_PLAYERS,
           game_state: initialRoom,
           status: "waiting",
         })
@@ -98,7 +110,7 @@ function MultiplayerContainer() {
       if (err || !data) throw err ?? new Error("Could not create room");
       setRoomId(data.id);
       setRoomCode(code);
-      setMySeat("player");
+      setMySeatId("seat-0");
       setStatus("waiting");
       setRoom(initialRoom);
       subscribe(data.id);
@@ -122,15 +134,27 @@ function MultiplayerContainer() {
         .eq("room_code", code)
         .eq("status", "waiting")
         .single();
-      if (findErr || !found) throw new Error("Room not found or already full.");
+      if (findErr || !found) throw new Error("Room not found or already started.");
 
-      const updatedRoom: RoomState = {
-        ...(found.game_state as RoomState),
-        names: { ...(found.game_state as RoomState).names, ai: username ?? "Player 2" },
-      };
+      const current = found.game_state as RoomState;
+      const existing = current.seats.find((s) => s.playerId === playerId);
+      let updatedRoom: RoomState;
+      let seatId: SeatId;
+      if (existing) {
+        seatId = existing.id;
+        updatedRoom = current;
+      } else {
+        if (current.seats.length >= MAX_PLAYERS) throw new Error("Room is full.");
+        seatId = `seat-${current.seats.length}`;
+        updatedRoom = {
+          ...current,
+          seats: [...current.seats, { id: seatId, playerId, name: username ?? `Player ${current.seats.length + 1}` }],
+        };
+      }
+
       const { data, error: updErr } = await supabase
         .from("games")
-        .update({ player2_id: playerId, status: "active", game_state: updatedRoom })
+        .update({ player_ids: updatedRoom.seats.map((s) => s.playerId), game_state: updatedRoom })
         .eq("id", found.id)
         .select()
         .single();
@@ -138,8 +162,8 @@ function MultiplayerContainer() {
 
       setRoomId(data.id);
       setRoomCode(code);
-      setMySeat("ai");
-      setStatus("active");
+      setMySeatId(seatId);
+      setStatus(data.status);
       setRoom(data.game_state as RoomState);
       subscribe(data.id);
       setScreen("room");
@@ -155,11 +179,33 @@ function MultiplayerContainer() {
     if (!roomId) return;
     try {
       await supabase.from("games").update({ game_state: next }).eq("id", roomId);
-      await supabase.from("moves").insert({
-        game_id: roomId,
-        player_id: playerId,
-        move_data: { turn: next.game.turn, status: next.game.status },
-      });
+      if (next.game) {
+        await supabase.from("moves").insert({
+          game_id: roomId,
+          player_id: playerId,
+          move_data: { turn: next.game.turn, status: next.game.status },
+        });
+      }
+    } catch {
+      /* best-effort sync */
+    }
+  }
+
+  async function startGame() {
+    if (!room || room.seats.length < MIN_PLAYERS) return;
+    const seatIds = room.seats.map((s) => s.id);
+    const game = createWhotGame(seatIds);
+    const next: RoomState = {
+      ...room,
+      game,
+      aiAssist: Object.fromEntries(seatIds.map((id) => [id, false])),
+      aiProfile: Object.fromEntries(seatIds.map((id) => [id, "balanced" as StrategyProfile])),
+    };
+    setRoom(next);
+    setStatus("active");
+    if (!roomId) return;
+    try {
+      await supabase.from("games").update({ game_state: next, status: "active" }).eq("id", roomId);
     } catch {
       /* best-effort sync */
     }
@@ -180,17 +226,17 @@ function MultiplayerContainer() {
         <div className="chip chip-pink" style={{ marginBottom: "1rem" }}>
           Multiplayer · Whot
         </div>
-        <h1 style={{ fontSize: "clamp(1.9rem, 4vw, 2.4rem)", marginBottom: "0.75rem" }}>Play with a friend, live</h1>
+        <h1 style={{ fontSize: "clamp(1.9rem, 4vw, 2.4rem)", marginBottom: "0.75rem" }}>Play with friends, live</h1>
         <p style={{ color: "var(--gray-400)", marginBottom: "2rem" }}>
-          Rooms sync in real time via Supabase. Either player can hand their seat to an AI agent — so you can run
-          Human vs Human, Human vs AI, or AI vs AI.
+          Rooms sync in real time via Supabase and hold up to {MAX_PLAYERS} players. Any seat can hand control to an AI
+          agent — so you can run any mix of Human vs Human vs AI at the table.
         </p>
 
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: "1.25rem" }}>
           <div className="panel" style={{ padding: "1.75rem" }}>
             <h3 style={{ fontSize: "1.1rem", marginBottom: "0.6rem" }}>Create a room</h3>
             <p style={{ color: "var(--gray-400)", fontSize: "0.88rem", marginBottom: "1.25rem" }}>
-              Get a room code to share with your opponent.
+              Get a room code to share with up to {MAX_PLAYERS - 1} friends.
             </p>
             <button type="button" className="btn btn-primary btn-block" onClick={createRoom} disabled={busy}>
               {busy ? "Creating…" : "Create Room"}
@@ -233,10 +279,12 @@ function MultiplayerContainer() {
     <RoomView
       room={room}
       status={status}
-      mySeat={mySeat}
+      mySeatId={mySeatId}
+      playerId={playerId}
       roomCode={roomCode}
       username={username ?? "You"}
       onWriteRoom={writeRoom}
+      onStartGame={startGame}
       onLeave={leaveRoom}
       recordedRef={recordedRef}
     />
@@ -245,12 +293,12 @@ function MultiplayerContainer() {
 
 function supabaseErrorMessage(e: unknown): string {
   const raw = extractMessage(e);
-  const setupHint = "Multiplayer tables aren't set up yet — run supabase-cards-setup.sql against your Supabase project.";
+  const setupHint = "Multiplayer tables aren't set up yet — run supabase-cards-setup.sql (and supabase-cards-multiplayer-update.sql) against your Supabase project.";
   if (!raw) return setupHint;
-  if (/relation .* does not exist/i.test(raw) || /schema cache/i.test(raw) || /not found/i.test(raw) || /404/.test(raw)) {
+  if (/relation .* does not exist/i.test(raw) || /schema cache/i.test(raw) || /not found/i.test(raw) || /404/.test(raw) || /column .* does not exist/i.test(raw)) {
     return setupHint;
   }
-  if (/room not found/i.test(raw)) return raw;
+  if (/room not found/i.test(raw) || /room is full/i.test(raw)) return raw;
   return `${setupHint} (${raw})`;
 }
 
@@ -265,63 +313,80 @@ function extractMessage(e: unknown): string {
 function RoomView({
   room,
   status,
-  mySeat,
+  mySeatId,
+  playerId,
   roomCode,
   username,
   onWriteRoom,
+  onStartGame,
   onLeave,
   recordedRef,
 }: {
   room: RoomState;
   status: "waiting" | "active" | "finished";
-  mySeat: Seat;
+  mySeatId: SeatId;
+  playerId: string;
   roomCode: string;
   username: string;
   onWriteRoom: (next: RoomState) => void;
+  onStartGame: () => void;
   onLeave: () => void;
   recordedRef: React.MutableRefObject<boolean>;
 }) {
-  const oppSeat: Seat = mySeat === "player" ? "ai" : "player";
   const roomRef = useRef(room);
   const timeoutRef = useRef<number | null>(null);
   const [pendingWhotCardId, setPendingWhotCardId] = useState<string | null>(null);
+  const [showIntro, setShowIntro] = useState(false);
+  const hadGameRef = useRef(!!room.game);
 
   useEffect(() => {
     roomRef.current = room;
   }, [room]);
 
+  // Play the shuffle/deal intro exactly once, the moment the host deals the game (lobby -> active).
+  useEffect(() => {
+    if (!hadGameRef.current && room.game) {
+      setShowIntro(true);
+    }
+    hadGameRef.current = !!room.game;
+  }, [room.game]);
+
+  const seatName = (id: SeatId) => room.seats.find((s) => s.id === id)?.name ?? id;
+  const isHost = room.hostPlayerId === playerId;
+
+  const game = room.game;
+
   // Drive my own seat's auto-play when I've enabled "let AI play for me".
   useEffect(() => {
     if (timeoutRef.current) window.clearTimeout(timeoutRef.current);
-    const game = room.game;
-    if (status !== "active" || game.status !== "playing") return;
-    if (game.turn !== mySeat || !room.aiAssist[mySeat]) return;
+    if (status !== "active" || !game || game.status !== "playing") return;
+    if (game.turn !== mySeatId || !room.aiAssist[mySeatId]) return;
 
     timeoutRef.current = window.setTimeout(() => {
       const current = roomRef.current;
-      if (current.game.turn !== mySeat || current.game.status !== "playing") return;
-      const profile = current.aiProfile[mySeat];
+      if (!current.game || current.game.turn !== mySeatId || current.game.status !== "playing") return;
+      const profile = current.aiProfile[mySeatId] ?? "balanced";
 
-      if (current.game.pendingPickThree > 0 && getPlayableCards(current.game, mySeat).length === 0) {
-        onWriteRoom({ ...current, game: resolvePickThree(current.game, mySeat) });
+      if (current.game.pendingPickThree > 0 && getPlayableCards(current.game, mySeatId).length === 0) {
+        onWriteRoom({ ...current, game: resolvePickThree(current.game, mySeatId) });
         return;
       }
 
-      const move = chooseWhotMove(current.game, mySeat, profile);
+      const move = chooseWhotMove(current.game, mySeatId, profile);
       if (move.action === "play") {
-        const { state: nextGame } = playCard(current.game, mySeat, move.cardId, move.suit);
+        const { state: nextGame } = playCard(current.game, mySeatId, move.cardId, move.suit);
         onWriteRoom({ ...current, game: nextGame });
         return;
       }
-      const drawn = voluntaryDraw(current.game, mySeat);
+      const drawn = voluntaryDraw(current.game, mySeatId);
       onWriteRoom({ ...current, game: drawn });
       window.setTimeout(() => {
         const c2 = roomRef.current;
-        if (c2.game.turn !== mySeat || c2.game.status !== "playing") return;
-        const card = shouldPlayDrawnCard(c2.game, mySeat);
+        if (!c2.game || c2.game.turn !== mySeatId || c2.game.status !== "playing") return;
+        const card = shouldPlayDrawnCard(c2.game, mySeatId);
         if (card) {
-          const suit = card.suit === "Whot" ? pickSuitToCall(c2.game.hands[mySeat], profile) : undefined;
-          const { state: nextGame } = playCard(c2.game, mySeat, card.id, suit);
+          const suit = card.suit === "Whot" ? pickSuitToCall(c2.game.hands[mySeatId], profile) : undefined;
+          const { state: nextGame } = playCard(c2.game, mySeatId, card.id, suit);
           onWriteRoom({ ...c2, game: nextGame });
         } else {
           onWriteRoom({ ...c2, game: endTurn(c2.game) });
@@ -333,39 +398,96 @@ function RoomView({
       if (timeoutRef.current) window.clearTimeout(timeoutRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [room, status, mySeat]);
+  }, [room, status, mySeatId, game]);
 
   useEffect(() => {
-    if (room.game.status === "playing" || recordedRef.current) return;
+    if (!game || game.status === "playing" || recordedRef.current) return;
     recordedRef.current = true;
-    const won = (mySeat === "player" && room.game.status === "player_won") || (mySeat === "ai" && room.game.status === "ai_won");
+    const won = game.winner === mySeatId;
+    const opponents = room.seats.filter((s) => s.id !== mySeatId).map((s) => s.name);
     recordMatch({
       game: "whot",
       result: won ? "win" : "loss",
       wager: WAGER,
-      opponent: room.names[oppSeat] || "Opponent",
-      aiAssisted: room.aiAssist[mySeat],
+      opponent: opponents.join(", ") || "Opponent",
+      aiAssisted: room.aiAssist[mySeatId] ?? false,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [room.game.status]);
+  }, [game?.status]);
 
-  const game = room.game;
-  const top = topCard(game);
-  const myPlayable = getPlayableCards(game, mySeat);
-  const isManualMyTurn = status === "active" && game.status === "playing" && game.turn === mySeat && !room.aiAssist[mySeat];
+  if (showIntro && game) {
+    return (
+      <WhotIntro
+        players={game.players.map((id) => ({ id, label: seatName(id) }))}
+        handSize={game.hands[game.players[0]]?.length ?? 5}
+        onComplete={() => setShowIntro(false)}
+      />
+    );
+  }
+
+  if (status === "waiting" || !game) {
+    return (
+      <div className="container section" style={{ paddingBottom: "3rem" }}>
+        <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: "0.75rem", marginBottom: "1.5rem" }}>
+          <span className="chip">
+            Room <span className="mono">{roomCode}</span>
+          </span>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={onLeave}>
+            Leave room
+          </button>
+        </div>
+
+        <div className="panel" style={{ padding: "2.5rem", textAlign: "center", marginBottom: "1.5rem" }}>
+          <div className="chip chip-gold" style={{ marginBottom: "1rem" }}>
+            <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--gold)" }} className="pulse-dot" />
+            Waiting for players ({room.seats.length}/{MAX_PLAYERS})
+          </div>
+          <p style={{ color: "var(--gray-400)", marginBottom: "1rem" }}>Share this room code:</p>
+          <div className="mono" style={{ fontSize: "2rem", color: "var(--green)", letterSpacing: "0.2em", marginBottom: "1.75rem" }}>
+            {roomCode}
+          </div>
+
+          <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: "0.6rem", marginBottom: "1.75rem" }}>
+            {room.seats.map((seat) => (
+              <span key={seat.id} className={`chip ${seat.id === mySeatId ? "chip-green" : ""}`}>
+                {seat.name}
+                {seat.playerId === room.hostPlayerId ? " · Host" : ""}
+                {seat.id === mySeatId ? " (you)" : ""}
+              </span>
+            ))}
+          </div>
+
+          {isHost ? (
+            <button type="button" className="btn btn-primary" onClick={onStartGame} disabled={room.seats.length < MIN_PLAYERS}>
+              {room.seats.length < MIN_PLAYERS ? `Need at least ${MIN_PLAYERS} players` : `Start Game (${room.seats.length} players)`}
+            </button>
+          ) : (
+            <p style={{ color: "var(--gray-400)", fontSize: "0.9rem" }}>Waiting for the host to start the game…</p>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  const opponents = room.seats.filter((s) => s.id !== mySeatId);
+  const myPlayable = getPlayableCards(game, mySeatId);
+  const isManualMyTurn = status === "active" && game.status === "playing" && game.turn === mySeatId && !room.aiAssist[mySeatId];
   const canDraw = isManualMyTurn && myPlayable.length === 0 && !game.hasDrawnThisTurn;
   const canPass = isManualMyTurn && myPlayable.length === 0 && game.hasDrawnThisTurn;
+  const top = topCard(game);
 
   function play(cardId: string, suit?: string) {
-    const { state: nextGame } = playCard(game, mySeat, cardId, suit);
+    if (!game) return;
+    const { state: nextGame } = playCard(game, mySeatId, cardId, suit);
     onWriteRoom({ ...room, game: nextGame });
   }
 
   function drawOrResolve() {
+    if (!game) return;
     if (game.pendingPickThree > 0) {
-      onWriteRoom({ ...room, game: resolvePickThree(game, mySeat) });
+      onWriteRoom({ ...room, game: resolvePickThree(game, mySeatId) });
     } else {
-      onWriteRoom({ ...room, game: voluntaryDraw(game, mySeat) });
+      onWriteRoom({ ...room, game: voluntaryDraw(game, mySeatId) });
     }
   }
 
@@ -380,15 +502,16 @@ function RoomView({
   }
 
   function toggleAiAssist() {
-    onWriteRoom({ ...room, aiAssist: { ...room.aiAssist, [mySeat]: !room.aiAssist[mySeat] } });
+    onWriteRoom({ ...room, aiAssist: { ...room.aiAssist, [mySeatId]: !room.aiAssist[mySeatId] } });
   }
 
   function setMyProfile(profile: StrategyProfile) {
-    onWriteRoom({ ...room, aiProfile: { ...room.aiProfile, [mySeat]: profile } });
+    onWriteRoom({ ...room, aiProfile: { ...room.aiProfile, [mySeatId]: profile } });
   }
 
-  const won = game.status === (mySeat === "player" ? "player_won" : "ai_won");
+  const won = game.status === "finished" && game.winner === mySeatId;
   const showResult = game.status !== "playing";
+  const winnerName = game.winner ? seatName(game.winner) : null;
 
   return (
     <div className="container section" style={{ paddingBottom: "3rem" }}>
@@ -398,154 +521,142 @@ function RoomView({
           <span className="chip">
             Room <span className="mono">{roomCode}</span>
           </span>
-          {room.aiAssist[mySeat] && <span className="chip chip-pink">AI playing for you · {strategyMeta(room.aiProfile[mySeat]).label}</span>}
-          {room.aiAssist[oppSeat] && <span className="chip chip-pink">Opponent using AI agent</span>}
+          {room.aiAssist[mySeatId] && <span className="chip chip-pink">AI playing for you · {strategyMeta(room.aiProfile[mySeatId] ?? "balanced").label}</span>}
         </div>
         <button type="button" className="btn btn-ghost btn-sm" onClick={onLeave}>
           Leave room
         </button>
       </div>
 
-      {status === "waiting" && (
-        <div className="panel" style={{ padding: "2.5rem", textAlign: "center", marginBottom: "1.5rem" }}>
-          <div className="chip chip-gold" style={{ marginBottom: "1rem" }}>
-            <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--gold)" }} className="pulse-dot" />
-            Waiting for opponent…
+      <div className="panel" style={{ padding: "1.25rem", marginBottom: "1.5rem", display: "flex", gap: "1rem", alignItems: "center", flexWrap: "wrap" }}>
+        <button type="button" className={`btn ${room.aiAssist[mySeatId] ? "btn-pink" : "btn-ghost"} btn-sm`} onClick={toggleAiAssist}>
+          {room.aiAssist[mySeatId] ? "AI is playing for you" : "Let AI play for me"}
+        </button>
+        {room.aiAssist[mySeatId] && (
+          <div style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap" }}>
+            {STRATEGIES.map((s) => (
+              <button
+                key={s.id}
+                type="button"
+                className="btn btn-sm"
+                style={{
+                  borderColor: room.aiProfile[mySeatId] === s.id ? `var(--${s.accent})` : "var(--gray-700)",
+                  color: room.aiProfile[mySeatId] === s.id ? `var(--${s.accent})` : "var(--gray-400)",
+                }}
+                onClick={() => setMyProfile(s.id)}
+              >
+                {s.label}
+              </button>
+            ))}
           </div>
-          <p style={{ color: "var(--gray-400)", marginBottom: "1rem" }}>Share this room code:</p>
-          <div className="mono" style={{ fontSize: "2rem", color: "var(--green)", letterSpacing: "0.2em" }}>
-            {roomCode}
-          </div>
-        </div>
-      )}
+        )}
+      </div>
 
-      {status !== "waiting" && (
-        <>
-          <div className="panel" style={{ padding: "1.25rem", marginBottom: "1.5rem", display: "flex", gap: "1rem", alignItems: "center", flexWrap: "wrap" }}>
-            <button type="button" className={`btn ${room.aiAssist[mySeat] ? "btn-pink" : "btn-ghost"} btn-sm`} onClick={toggleAiAssist}>
-              {room.aiAssist[mySeat] ? "AI is playing for you" : "Let AI play for me"}
-            </button>
-            {room.aiAssist[mySeat] && (
-              <div style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap" }}>
-                {STRATEGIES.map((s) => (
-                  <button
-                    key={s.id}
-                    type="button"
-                    className="btn btn-sm"
-                    style={{
-                      borderColor: room.aiProfile[mySeat] === s.id ? `var(--${s.accent})` : "var(--gray-700)",
-                      color: room.aiProfile[mySeat] === s.id ? `var(--${s.accent})` : "var(--gray-400)",
-                    }}
-                    onClick={() => setMyProfile(s.id)}
-                  >
-                    {s.label}
-                  </button>
-                ))}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 280px", gap: "1.5rem" }} className="whot-layout">
+        <div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem", marginBottom: "1.5rem" }}>
+            {opponents.map((seat) => (
+              <div key={seat.id} className="panel" style={{ padding: "0.75rem 1rem", minWidth: 150 }}>
+                <SeatLabel
+                  label={seat.name + (room.aiAssist[seat.id] ? " · AI" : "")}
+                  count={game.hands[seat.id]?.length ?? 0}
+                  active={game.turn === seat.id}
+                  accent="pink"
+                />
               </div>
-            )}
+            ))}
           </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 280px", gap: "1.5rem" }} className="whot-layout">
-            <div>
-              <SeatLabel label={room.names[oppSeat] || "Opponent"} count={game.hands[oppSeat].length} active={game.turn === oppSeat} accent="pink" />
-              <div style={{ display: "flex", justifyContent: "center", gap: "0.3rem", marginBottom: "2rem", flexWrap: "wrap" }}>
-                {game.hands[oppSeat].map((_, i) => (
-                  <CardBackView key={i} size="sm" />
-                ))}
+          <div className="panel" style={{ padding: "1.75rem", display: "flex", alignItems: "center", justifyContent: "center", gap: "2rem", flexWrap: "wrap", marginBottom: "2rem" }}>
+            <div style={{ textAlign: "center" }}>
+              <div className="data-label" style={{ marginBottom: "0.6rem" }}>
+                Draw Pile ({game.drawPile.length})
               </div>
-
-              <div className="panel" style={{ padding: "1.75rem", display: "flex", alignItems: "center", justifyContent: "center", gap: "2rem", flexWrap: "wrap", marginBottom: "2rem" }}>
-                <div style={{ textAlign: "center" }}>
-                  <div className="data-label" style={{ marginBottom: "0.6rem" }}>
-                    Draw Pile ({game.drawPile.length})
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => canDraw && drawOrResolve()}
-                    disabled={!canDraw}
-                    style={{ background: "none", border: "none", padding: 0, cursor: canDraw ? "pointer" : "default" }}
-                    aria-label="Draw a card"
-                  >
-                    <CardBackView />
-                  </button>
-                </div>
-                <div style={{ textAlign: "center" }}>
-                  <div className="data-label" style={{ marginBottom: "0.6rem" }}>
-                    Top Card
-                  </div>
-                  <WhotCardView card={top} dealt />
-                  {game.calledSuit && (
-                    <div className="chip chip-pink" style={{ marginTop: "0.75rem" }}>
-                      Called: {game.calledSuit}
-                    </div>
-                  )}
-                  {game.pendingPickThree > 0 && (
-                    <div className="chip chip-gold" style={{ marginTop: "0.75rem" }}>
-                      Pick Three pending — draw {game.pendingPickThree} or defend with a 5
-                    </div>
-                  )}
-                  {game.holdOnFreePlay && (
-                    <div className="chip chip-green" style={{ marginTop: "0.75rem" }}>
-                      Hold On — play again, any suit
-                    </div>
-                  )}
-                </div>
+              <button
+                type="button"
+                onClick={() => canDraw && drawOrResolve()}
+                disabled={!canDraw}
+                style={{ background: "none", border: "none", padding: 0, cursor: canDraw ? "pointer" : "default" }}
+                aria-label="Draw a card"
+              >
+                <CardBackView />
+              </button>
+            </div>
+            <div style={{ textAlign: "center" }}>
+              <div className="data-label" style={{ marginBottom: "0.6rem" }}>
+                Top Card
               </div>
-
-              {(canDraw || canPass) && (
-                <div style={{ display: "flex", justifyContent: "center", gap: "0.75rem", marginBottom: "1.5rem" }}>
-                  {canDraw && (
-                    <button type="button" className="btn btn-gold" onClick={drawOrResolve}>
-                      {game.pendingPickThree > 0 ? `Draw ${game.pendingPickThree} (Pick Three)` : "Draw Card"}
-                    </button>
-                  )}
-                  {canPass && (
-                    <button type="button" className="btn btn-ghost" onClick={() => onWriteRoom({ ...room, game: endTurn(game) })}>
-                      Pass Turn
-                    </button>
-                  )}
+              <WhotCardView card={top} dealt />
+              {game.calledSuit && (
+                <div className="chip chip-pink" style={{ marginTop: "0.75rem" }}>
+                  Called: {game.calledSuit}
                 </div>
               )}
-
-              <SeatLabel label={username} count={game.hands[mySeat].length} active={game.turn === mySeat} accent="green" />
-              <div style={{ display: "flex", justifyContent: "center", gap: "0.4rem", flexWrap: "wrap", marginTop: "0.75rem" }}>
-                {game.hands[mySeat].map((card) => {
-                  const isPlayable = isManualMyTurn && myPlayable.some((c) => c.id === card.id);
-                  return (
-                    <WhotCardView
-                      key={card.id}
-                      card={card}
-                      interactive={isManualMyTurn}
-                      disabled={isManualMyTurn && !isPlayable}
-                      selected={pendingWhotCardId === card.id}
-                      onClick={() => handleClick(card.id, card.suit === "Whot")}
-                    />
-                  );
-                })}
-              </div>
+              {game.pendingPickThree > 0 && (
+                <div className="chip chip-gold" style={{ marginTop: "0.75rem" }}>
+                  Pick Three pending — draw {game.pendingPickThree} or defend with a 5
+                </div>
+              )}
+              {game.holdOnFreePlay && (
+                <div className="chip chip-green" style={{ marginTop: "0.75rem" }}>
+                  Hold On — play again, any suit
+                </div>
+              )}
             </div>
-
-            <aside className="panel" style={{ padding: "1rem", maxHeight: 460, display: "flex", flexDirection: "column" }}>
-              <div className="data-label" style={{ marginBottom: "0.75rem" }}>
-                Match Log
-              </div>
-              <div style={{ overflowY: "auto", flex: 1, display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-                {game.log.map((entry) => (
-                  <div
-                    key={entry.id}
-                    style={{
-                      fontSize: "0.8rem",
-                      color: entry.tone === "good" ? "var(--green)" : entry.tone === "bad" ? "var(--red)" : entry.tone === "special" ? "var(--gold)" : "var(--gray-400)",
-                    }}
-                  >
-                    {entry.text}
-                  </div>
-                ))}
-              </div>
-            </aside>
           </div>
-        </>
-      )}
+
+          {(canDraw || canPass) && (
+            <div style={{ display: "flex", justifyContent: "center", gap: "0.75rem", marginBottom: "1.5rem" }}>
+              {canDraw && (
+                <button type="button" className="btn btn-gold" onClick={drawOrResolve}>
+                  {game.pendingPickThree > 0 ? `Draw ${game.pendingPickThree} (Pick Three)` : "Draw Card"}
+                </button>
+              )}
+              {canPass && (
+                <button type="button" className="btn btn-ghost" onClick={() => onWriteRoom({ ...room, game: endTurn(game) })}>
+                  Pass Turn
+                </button>
+              )}
+            </div>
+          )}
+
+          <SeatLabel label={username} count={game.hands[mySeatId]?.length ?? 0} active={game.turn === mySeatId} accent="green" />
+          <div style={{ display: "flex", justifyContent: "center", gap: "0.4rem", flexWrap: "wrap", marginTop: "0.75rem" }}>
+            {(game.hands[mySeatId] ?? []).map((card) => {
+              const isPlayable = isManualMyTurn && myPlayable.some((c) => c.id === card.id);
+              return (
+                <WhotCardView
+                  key={card.id}
+                  card={card}
+                  interactive={isManualMyTurn}
+                  disabled={isManualMyTurn && !isPlayable}
+                  selected={pendingWhotCardId === card.id}
+                  onClick={() => handleClick(card.id, card.suit === "Whot")}
+                />
+              );
+            })}
+          </div>
+        </div>
+
+        <aside className="panel" style={{ padding: "1rem", maxHeight: 460, display: "flex", flexDirection: "column" }}>
+          <div className="data-label" style={{ marginBottom: "0.75rem" }}>
+            Match Log
+          </div>
+          <div style={{ overflowY: "auto", flex: 1, display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+            {game.log.map((entry) => (
+              <div
+                key={entry.id}
+                style={{
+                  fontSize: "0.8rem",
+                  color: entry.tone === "good" ? "var(--green)" : entry.tone === "bad" ? "var(--red)" : entry.tone === "special" ? "var(--gold)" : "var(--gray-400)",
+                }}
+              >
+                {entry.text}
+              </div>
+            ))}
+          </div>
+        </aside>
+      </div>
 
       {pendingWhotCardId && (
         <div
@@ -580,10 +691,10 @@ function RoomView({
       {showResult && (
         <ResultOverlay
           won={won}
-          title={won ? "You Win!" : "Opponent Wins"}
-          subtitle={won ? "You emptied your hand first." : "Your opponent emptied their hand first."}
+          title={won ? "You Win!" : `${winnerName ?? "Opponent"} Wins`}
+          subtitle={won ? "You emptied your hand first." : `${winnerName ?? "Your opponent"} emptied their hand first.`}
           payoutText={won ? `${(WAGER * 2).toFixed(2)} RITUAL to your wallet` : "Better luck next hand"}
-          onPlayAgain={() => onWriteRoom({ ...room, game: createWhotGame() })}
+          onPlayAgain={() => onWriteRoom({ ...room, game: createWhotGame(room.seats.map((s) => s.id)) })}
           onExit={onLeave}
         />
       )}

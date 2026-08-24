@@ -14,8 +14,10 @@ export interface GameRow {
   id: string;
   room_code: string;
   game_type: "whot" | "poker";
-  player1_id: string;
+  player1_id: string | null;
   player2_id: string | null;
+  player_ids: string[];
+  max_players: number;
   game_state: unknown;
   status: "waiting" | "active" | "finished";
   created_at: string;

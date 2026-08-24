@@ -4,17 +4,21 @@ export interface WhotCard {
   id: string;
   suit: WhotSuit;
   number: number; // 20 for Whot cards
+  secondNumber?: number; // Star suit cards carry a paired second number they can also match on
 }
 
-export type WhotPlayer = "player" | "ai";
+// A seat id — "player"/"ai" for the single-player table, "seat-0".."seat-9" for multiplayer rooms.
+export type WhotPlayer = string;
 
 export interface WhotGameState {
   drawPile: WhotCard[];
   discard: WhotCard[]; // last item is the top/active card
+  players: WhotPlayer[]; // turn order, one entry per seat
   hands: Record<WhotPlayer, WhotCard[]>;
   turn: WhotPlayer;
   calledSuit: WhotSuit | null;
-  status: "playing" | "player_won" | "ai_won";
+  status: "playing" | "finished";
+  winner: WhotPlayer | null;
   pendingDrawFor: WhotPlayer | null; // whose turn is skipped/forced next (for animation cues)
   log: LogEntry[];
   awaitingSuitCall: boolean; // player just played a Whot card, must call a suit

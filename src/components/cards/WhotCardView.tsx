@@ -113,7 +113,7 @@ export function WhotCardView({
       style={style}
       role={interactive ? "button" : undefined}
       tabIndex={interactive && !disabled ? 0 : undefined}
-      aria-label={isWhot ? "Whot wild card" : `${card.suit} ${card.number}`}
+      aria-label={isWhot ? "Whot wild card" : `${card.suit} ${card.number}${card.secondNumber ? ` / ${card.secondNumber}` : ""}`}
       onClick={disabled ? undefined : onClick}
       onKeyDown={
         interactive && !disabled
@@ -139,12 +139,14 @@ export function WhotCardView({
         <>
           <div className="card-corner" style={{ color: suitColor(card.suit) }}>
             {card.number}
+            {card.secondNumber != null && <span className="card-second-number">{card.secondNumber}</span>}
           </div>
           <div className="card-center">
             <SuitIcon suit={card.suit} />
           </div>
           <div className="card-corner bottom" style={{ color: suitColor(card.suit) }}>
             {card.number}
+            {card.secondNumber != null && <span className="card-second-number">{card.secondNumber}</span>}
           </div>
           {specialLabel(card) && (
             <div className="whot-badge" style={{ color: suitColor(card.suit) }}>

@@ -4,6 +4,7 @@ import { ModeSelect, type PlayMode } from "@/components/ModeSelect";
 import { ResultOverlay } from "@/components/ResultOverlay";
 import { SoundToggleButton } from "@/components/SoundToggleButton";
 import { WhotCardView, CardBackView } from "@/components/cards/WhotCardView";
+import { WhotIntro } from "@/components/whot/WhotIntro";
 import { useUsername } from "@/context/UsernameContext";
 import { useSound } from "@/context/SoundContext";
 import { recordMatch } from "@/lib/storage";
@@ -72,6 +73,7 @@ function WhotBoard({ mode, onExit }: { mode: PlayMode; onExit: () => void }) {
   const { speak, playSfx, playMusic, stopMusic } = useSound();
   const [state, dispatch] = useReducer(reducer, undefined, createWhotGame);
   const [pendingWhotCardId, setPendingWhotCardId] = useState<string | null>(null);
+  const [showIntro, setShowIntro] = useState(true);
   const stateRef = useRef(state);
   const prevStateRef = useRef(state);
   const timeoutRef = useRef<number | null>(null);
@@ -184,7 +186,7 @@ function WhotBoard({ mode, onExit }: { mode: PlayMode; onExit: () => void }) {
   useEffect(() => {
     if (state.status === "playing" || recordedRef.current) return;
     recordedRef.current = true;
-    if (state.status === "player_won") {
+    if (state.winner === "player") {
       playSfx("win");
       speak("You win!");
     } else {
@@ -193,7 +195,7 @@ function WhotBoard({ mode, onExit }: { mode: PlayMode; onExit: () => void }) {
     }
     recordMatch({
       game: "whot",
-      result: state.status === "player_won" ? "win" : "loss",
+      result: state.winner === "player" ? "win" : "loss",
       wager: WAGER,
       opponent: "Ritual AI",
       aiAssisted: playerIsAiControlled,
@@ -239,11 +241,25 @@ function WhotBoard({ mode, onExit }: { mode: PlayMode; onExit: () => void }) {
 
   function resetHand() {
     recordedRef.current = false;
+    setShowIntro(true);
     dispatch({ type: "RESET" });
   }
 
   const showResult = state.status !== "playing";
-  const playerWon = state.status === "player_won";
+  const playerWon = state.winner === "player";
+
+  if (showIntro) {
+    return (
+      <WhotIntro
+        players={[
+          { id: "player", label: username ?? "You" },
+          { id: "ai", label: "Ritual AI" },
+        ]}
+        handSize={state.hands.player.length}
+        onComplete={() => setShowIntro(false)}
+      />
+    );
+  }
 
   return (
     <div className="container section" style={{ paddingBottom: "3rem" }}>

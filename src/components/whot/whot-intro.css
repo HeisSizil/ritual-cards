@@ -1,0 +1,111 @@
+.whot-intro-overlay {
+  position: fixed;
+  inset: 0;
+  background: radial-gradient(circle at 50% 42%, rgba(25, 209, 132, 0.1), rgba(5, 7, 10, 0.97) 70%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+  animation: introFadeIn 0.3s ease both;
+}
+
+.whot-intro-stage {
+  position: relative;
+  width: 100%;
+  max-width: 640px;
+  height: 420px;
+}
+
+.whot-intro-deck {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 76px;
+  height: 108px;
+  transform: translate(-50%, -50%);
+}
+
+.whot-intro-deck-card {
+  position: absolute;
+  inset: 0;
+  border-radius: 10px;
+  background: linear-gradient(160deg, #0c1118, #05070a);
+  border: 1px solid rgba(25, 209, 132, 0.4);
+  box-shadow: 0 4px 10px -4px rgba(0, 0, 0, 0.7);
+  transform: translate(calc(var(--i) * 0.6px), calc(var(--i) * -0.6px));
+}
+
+.whot-intro-deck.shuffling .whot-intro-deck-card {
+  animation: introShuffle 0.42s ease-in-out infinite alternate;
+  animation-delay: calc(var(--i) * 0.03s);
+}
+
+@keyframes introShuffle {
+  0% {
+    transform: translate(calc(var(--i) * 0.6px), calc(var(--i) * -0.6px)) rotate(0deg);
+  }
+  50% {
+    transform: translate(calc((var(--i) - 6.5) * 9px), calc((var(--i) - 6.5) * -3px)) rotate(calc((var(--i) - 6.5) * 5deg));
+  }
+  100% {
+    transform: translate(calc(var(--i) * 0.6px), calc(var(--i) * -0.6px)) rotate(0deg);
+  }
+}
+
+.whot-intro-flying-card {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 76px;
+  height: 108px;
+  margin-left: -38px;
+  margin-top: -54px;
+  border-radius: 10px;
+  background: linear-gradient(160deg, #0c1118, #05070a);
+  border: 1px solid rgba(25, 209, 132, 0.45);
+  box-shadow: 0 10px 22px -8px rgba(0, 0, 0, 0.7);
+  --tx: 0px;
+  --ty: 0px;
+  animation: introDeal 0.42s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+@keyframes introDeal {
+  0% {
+    transform: translate(0, 0) scale(0.9) rotate(0deg);
+    opacity: 0.4;
+  }
+  100% {
+    transform: translate(var(--tx), var(--ty)) scale(0.7) rotate(6deg);
+    opacity: 1;
+  }
+}
+
+.whot-intro-seat-label {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(calc(-50% + var(--tx)), calc(-50% + var(--ty) + 68px));
+  color: var(--gray-300);
+  font-size: 0.82rem;
+  font-weight: 600;
+  white-space: nowrap;
+  text-shadow: 0 2px 6px rgba(0, 0, 0, 0.7);
+}
+
+.whot-intro-caption {
+  margin-top: 2rem;
+  color: var(--gray-400);
+  font-size: 0.9rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+@keyframes introFadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}

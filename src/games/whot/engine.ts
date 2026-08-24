@@ -1,7 +1,7 @@
 import { buildWhotDeck, shuffle, specialLabel } from "./deck";
 import type { WhotCard, WhotGameState, WhotPlayer, LogEntry } from "./types";
 
-const HAND_SIZE = 5;
+const DEFAULT_SEATS: WhotPlayer[] = ["player", "ai"];
 
 function uid() {
   return Math.random().toString(36).slice(2, 10);
@@ -11,19 +11,41 @@ function log(text: string, tone: LogEntry["tone"] = "info"): LogEntry {
   return { id: uid(), text, tone };
 }
 
-export function other(who: WhotPlayer): WhotPlayer {
-  return who === "player" ? "ai" : "player";
+/** Friendly label for a seat in match-log text; falls back to the raw seat id for multiplayer seats. */
+function seatLabel(seat: WhotPlayer): string {
+  if (seat === "player") return "You";
+  if (seat === "ai") return "AI";
+  return seat;
+}
+
+/** Smaller hands as the table grows, so a 54-card deck always covers dealing + a usable draw pile. */
+export function handSizeForPlayers(n: number): number {
+  if (n <= 4) return 5;
+  if (n <= 6) return 4;
+  return 3;
 }
 
 export function topCard(state: WhotGameState): WhotCard {
   return state.discard[state.discard.length - 1];
 }
 
-export function createWhotGame(): WhotGameState {
+/** The seat `offset` turn-order slots away from the current turn (wraps around the table). */
+function seatAt(state: WhotGameState, offset: number): WhotPlayer {
+  const order = state.players;
+  const idx = order.indexOf(state.turn);
+  const n = order.length;
+  return order[(((idx + offset) % n) + n) % n];
+}
+
+export function createWhotGame(seats: WhotPlayer[] = DEFAULT_SEATS): WhotGameState {
+  const handSize = handSizeForPlayers(seats.length);
   let deck = shuffle(buildWhotDeck());
-  const playerHand = deck.slice(0, HAND_SIZE);
-  const aiHand = deck.slice(HAND_SIZE, HAND_SIZE * 2);
-  deck = deck.slice(HAND_SIZE * 2);
+
+  const hands: Record<WhotPlayer, WhotCard[]> = {};
+  seats.forEach((seat, i) => {
+    hands[seat] = deck.slice(i * handSize, (i + 1) * handSize);
+  });
+  deck = deck.slice(seats.length * handSize);
 
   // Starting discard card must not be a Whot (wild) card.
   let startIdx = deck.findIndex((c) => c.suit !== "Whot");
@@ -34,12 +56,21 @@ export function createWhotGame(): WhotGameState {
   return {
     drawPile: deck,
     discard: [starter],
-    hands: { player: playerHand, ai: aiHand },
-    turn: "player",
+    players: seats,
+    hands,
+    turn: seats[0],
     calledSuit: null,
     status: "playing",
+    winner: null,
     pendingDrawFor: null,
-    log: [log("New hand dealt. You go first — match the suit or number on top.", "info")],
+    log: [
+      log(
+        seats.length > 2
+          ? "New hand dealt. Match the suit or number on top."
+          : "New hand dealt. You go first — match the suit or number on top.",
+        "info",
+      ),
+    ],
     awaitingSuitCall: false,
     turnCount: 0,
     hasDrawnThisTurn: false,
@@ -61,6 +92,8 @@ export function isCardPlayable(
   if (holdOnFreePlay) return true;
   if (card.suit === "Whot") return true;
   if (calledSuit) return card.suit === calledSuit;
+  // A Star card can also be played by matching its paired second number against the top card's number.
+  if (card.suit === "Star" && card.secondNumber != null && card.secondNumber === top.number) return true;
   return card.suit === top.suit || card.number === top.number;
 }
 
@@ -95,12 +128,17 @@ export function drawCards(state: WhotGameState, who: WhotPlayer, count: number):
   return {
     ...next,
     hands: { ...next.hands, [who]: [...next.hands[who], ...drawn] },
-    log: [...next.log, log(`${who === "player" ? "You" : "AI"} drew ${drawn.length} card${drawn.length > 1 ? "s" : ""}.`, "info")],
+    log: [...next.log, log(`${seatLabel(who)} drew ${drawn.length} card${drawn.length > 1 ? "s" : ""}.`, "info")],
   };
 }
 
+/** Moves the turn `steps` seats forward in table order (1 = next seat, 2 = skip one seat, ...). */
+export function advanceTurn(state: WhotGameState, steps = 1): WhotGameState {
+  return { ...state, turn: seatAt(state, steps), turnCount: state.turnCount + 1, hasDrawnThisTurn: false };
+}
+
 export function endTurn(state: WhotGameState): WhotGameState {
-  return { ...state, turn: other(state.turn), turnCount: state.turnCount + 1, hasDrawnThisTurn: false };
+  return advanceTurn(state, 1);
 }
 
 /** A player's own choice to draw because they have no playable card. Distinct from forced draws (Pick Two/Three/Market). */
@@ -135,7 +173,7 @@ export function playCard(state: WhotGameState, who: WhotPlayer, cardId: string, 
     pendingPickThree: card.number === 5 ? state.pendingPickThree : 0,
   };
 
-  const actorLabel = who === "player" ? "You" : "AI";
+  const actorLabel = seatLabel(who);
   const suitLabel = card.suit === "Whot" ? "Whot" : card.suit;
   next.log = [...next.log, log(`${actorLabel} played ${suitLabel} ${card.suit === "Whot" ? "" : card.number}${specialLabel(card) ? ` — ${specialLabel(card)}` : ""}`.trim(), "info")];
 
@@ -149,8 +187,15 @@ export function playCard(state: WhotGameState, who: WhotPlayer, cardId: string, 
   }
 
   if (newHand.length === 0) {
-    next.status = who === "player" ? "player_won" : "ai_won";
-    next.log = [...next.log, log(who === "player" ? "You played your last card. You win!" : "AI played its last card. AI wins.", who === "player" ? "good" : "bad")];
+    next.status = "finished";
+    next.winner = who;
+    const winMsg =
+      who === "player"
+        ? "You played your last card. You win!"
+        : who === "ai"
+          ? "AI played its last card. AI wins."
+          : `${seatLabel(who)} played their last card and wins!`;
+    next.log = [...next.log, log(winMsg, who === "player" ? "good" : "bad")];
     return { state: next, requiresSuitCall: false };
   }
 
@@ -173,13 +218,18 @@ export function playCard(state: WhotGameState, who: WhotPlayer, cardId: string, 
       return { state: next, requiresSuitCall: false };
     }
     case 8: {
-      // Suspension: opponent's turn is skipped entirely, current player goes again.
-      next.log = [...next.log, log(`${other(who) === "player" ? "You are" : "AI is"} skipped — ${actorLabel} plays again.`, "special")];
+      // Suspension: the next seat's turn is skipped entirely; play resumes with the seat after that
+      // (with only 2 players, that's the same player going again).
+      const skipped = seatAt(next, 1);
+      next.log = [...next.log, log(`${seatLabel(skipped)} ${skipped === "player" ? "are" : "is"} skipped — ${actorLabel} plays again.`, "special")];
+      next = advanceTurn(next, 2);
       return { state: next, requiresSuitCall: false };
     }
     case 2: {
-      next = drawCards(next, other(who), 2);
-      next.log = [...next.log, log(`${other(who) === "player" ? "You" : "AI"} picked up 2 cards.`, "special")];
+      const target = seatAt(next, 1);
+      next = drawCards(next, target, 2);
+      next.log = [...next.log, log(`${seatLabel(target)} picked up 2 cards.`, "special")];
+      next = advanceTurn(next, 2);
       return { state: next, requiresSuitCall: false };
     }
     case 5: {
@@ -201,8 +251,12 @@ export function playCard(state: WhotGameState, who: WhotPlayer, cardId: string, 
       // General Market: every opponent draws one, then the same player goes again — they must
       // follow suit/number of this 14 (or play another 14, chaining the market again) until they
       // play a non-14 card, at which point the turn finally passes.
-      next = drawCards(next, other(who), 1);
-      next.log = [...next.log, log(`General Market — ${other(who) === "player" ? "you" : "AI"} picked up a card. ${actorLabel} plays again.`, "special")];
+      const others = next.players.filter((p) => p !== who);
+      for (const p of others) {
+        next = drawCards(next, p, 1);
+      }
+      const targetLabel = others.length === 1 ? (others[0] === "player" ? "you" : seatLabel(others[0])) : "everyone else";
+      next.log = [...next.log, log(`General Market — ${targetLabel} picked up a card${others.length > 1 ? "s" : ""}. ${actorLabel} plays again.`, "special")];
       return { state: next, requiresSuitCall: false };
     }
     default: {
@@ -218,7 +272,7 @@ export function resolvePickThree(state: WhotGameState, who: WhotPlayer): WhotGam
   if (count <= 0) return state;
   let next = drawCards(state, who, count);
   next = { ...next, pendingPickThree: 0 };
-  next.log = [...next.log, log(`${who === "player" ? "You" : "AI"} couldn't defend Pick Three and drew ${count} cards.`, "bad")];
+  next.log = [...next.log, log(`${seatLabel(who)} couldn't defend Pick Three and drew ${count} cards.`, "bad")];
   next = endTurn(next);
   return next;
 }

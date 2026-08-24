@@ -72,6 +72,13 @@
   margin-top: 1px;
 }
 
+.card-second-number {
+  font-size: 0.55rem;
+  font-weight: 600;
+  opacity: 0.7;
+  line-height: 1;
+}
+
 .card-center {
   position: absolute;
   inset: 0;
