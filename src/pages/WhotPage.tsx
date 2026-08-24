@@ -112,13 +112,11 @@ function WhotBoard({ mode, onExit }: { mode: PlayMode; onExit: () => void }) {
           speak("Hold On!");
         }
 
-        if (state.status === "playing" && state.hands[actor].length === 1) {
+        if (state.hands[actor].length === 0) {
           speak(actor === "player" ? "Check up!" : "Opponent check up!");
+        } else if (state.hands[actor].length === 1) {
+          speak(actor === "player" ? "Last card!" : "Opponent last card!");
         }
-      }
-
-      if (prev.turn !== state.turn && state.status === "playing" && state.hands[state.turn].length === 1) {
-        speak(state.turn === "player" ? "Last card!" : "Opponent last card!");
       }
 
       prevStateRef.current = state;
