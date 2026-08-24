@@ -100,8 +100,7 @@ function MultiplayerContainer() {
         .insert({
           room_code: code,
           game_type: "whot",
-          player_ids: [playerId],
-          max_players: MAX_PLAYERS,
+          player1_id: playerId,
           game_state: initialRoom,
           status: "waiting",
         })
@@ -154,7 +153,7 @@ function MultiplayerContainer() {
 
       const { data, error: updErr } = await supabase
         .from("games")
-        .update({ player_ids: updatedRoom.seats.map((s) => s.playerId), game_state: updatedRoom })
+        .update({ game_state: updatedRoom })
         .eq("id", found.id)
         .select()
         .single();
@@ -292,14 +291,41 @@ function MultiplayerContainer() {
 }
 
 function supabaseErrorMessage(e: unknown): string {
+  const code = extractCode(e);
   const raw = extractMessage(e);
   const setupHint = "Multiplayer tables aren't set up yet — run supabase-cards-setup.sql (and supabase-cards-multiplayer-update.sql) against your Supabase project.";
+
+  switch (code) {
+    case "42P01": // undefined_table
+      return setupHint;
+    case "42703": // undefined_column
+      return `${setupHint} (schema is out of date)`;
+    case "42501": // insufficient_privilege (RLS)
+      return "Access denied by row-level security — check your Supabase RLS policies for the games table.";
+    case "PGRST116": // no rows for .single()
+      return "Room not found or already started.";
+    case "23505": // unique_violation
+      return "That room code is already in use — try again.";
+    case "PGRST301": // JWT expired / auth issue
+      return "Supabase session expired — refresh the page and try again.";
+  }
+
   if (!raw) return setupHint;
-  if (/relation .* does not exist/i.test(raw) || /schema cache/i.test(raw) || /not found/i.test(raw) || /404/.test(raw) || /column .* does not exist/i.test(raw)) {
+  if (/relation .* does not exist/i.test(raw) || /schema cache/i.test(raw) || /column .* does not exist/i.test(raw)) {
     return setupHint;
   }
   if (/room not found/i.test(raw) || /room is full/i.test(raw)) return raw;
+  if (/failed to fetch/i.test(raw) || /network/i.test(raw)) {
+    return "Couldn't reach Supabase — check your connection and try again.";
+  }
   return `${setupHint} (${raw})`;
+}
+
+function extractCode(e: unknown): string | null {
+  if (e && typeof e === "object" && "code" in e && typeof (e as { code: unknown }).code === "string") {
+    return (e as { code: string }).code;
+  }
+  return null;
 }
 
 function extractMessage(e: unknown): string {
