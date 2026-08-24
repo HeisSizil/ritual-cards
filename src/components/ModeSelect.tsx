@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { STRATEGIES, type StrategyProfile } from "@/lib/aiStrategy";
+import { VoicePicker } from "@/components/VoicePicker";
 
 export type PlayMode = { mode: "manual" } | { mode: "ai"; profile: StrategyProfile };
 
@@ -7,10 +8,12 @@ export function ModeSelect({
   gameName,
   wagerLabel,
   onStart,
+  showVoicePicker = false,
 }: {
   gameName: string;
   wagerLabel: string;
   onStart: (mode: PlayMode) => void;
+  showVoicePicker?: boolean;
 }) {
   const [choice, setChoice] = useState<"manual" | "ai" | null>(null);
   const [profile, setProfile] = useState<StrategyProfile>("balanced");
@@ -25,6 +28,8 @@ export function ModeSelect({
         Wager: <span className="mono" style={{ color: "var(--gray-200)" }}>{wagerLabel}</span> · Auto-payout via
         smart contract on mainnet.
       </p>
+
+      {showVoicePicker && <VoicePicker />}
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: "1.25rem", marginBottom: "1.75rem" }}>
         <ModeCard

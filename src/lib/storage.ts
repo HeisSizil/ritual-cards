@@ -24,7 +24,76 @@ const KEYS = {
   stats: "ritual-cards:stats",
   pokerBalance: "ritual-cards:poker-balance",
   soundMuted: "ritual-cards:sound-muted",
+  masterVolume: "ritual-cards:master-volume",
+  musicVolume: "ritual-cards:music-volume",
+  voiceVolume: "ritual-cards:voice-volume",
+  voiceGender: "ritual-cards:voice-gender",
 } as const;
+
+export type VoiceGenderPref = "male" | "female";
+
+function clampVolume(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(100, Math.max(0, Math.round(value)));
+}
+
+function getVolume(key: keyof typeof KEYS, fallback: number): number {
+  try {
+    const raw = localStorage.getItem(KEYS[key]);
+    if (raw === null) return fallback;
+    return clampVolume(Number(raw));
+  } catch {
+    return fallback;
+  }
+}
+
+function setVolume(key: keyof typeof KEYS, value: number): void {
+  try {
+    localStorage.setItem(KEYS[key], String(clampVolume(value)));
+  } catch {
+    /* ignore */
+  }
+}
+
+export function getMasterVolume(): number {
+  return getVolume("masterVolume", 80);
+}
+
+export function setMasterVolume(value: number): void {
+  setVolume("masterVolume", value);
+}
+
+export function getMusicVolume(): number {
+  return getVolume("musicVolume", 35);
+}
+
+export function setMusicVolume(value: number): void {
+  setVolume("musicVolume", value);
+}
+
+export function getVoiceVolume(): number {
+  return getVolume("voiceVolume", 100);
+}
+
+export function setVoiceVolume(value: number): void {
+  setVolume("voiceVolume", value);
+}
+
+export function getVoiceGender(): VoiceGenderPref {
+  try {
+    return localStorage.getItem(KEYS.voiceGender) === "male" ? "male" : "female";
+  } catch {
+    return "female";
+  }
+}
+
+export function setVoiceGender(value: VoiceGenderPref): void {
+  try {
+    localStorage.setItem(KEYS.voiceGender, value);
+  } catch {
+    /* ignore */
+  }
+}
 
 export function getUsername(): string | null {
   try {

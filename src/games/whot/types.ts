@@ -20,6 +20,8 @@ export interface WhotGameState {
   awaitingSuitCall: boolean; // player just played a Whot card, must call a suit
   turnCount: number;
   hasDrawnThisTurn: boolean;
+  pendingPickThree: number; // accumulated draw penalty from an unanswered Pick Three (card 5); 0 = none pending
+  holdOnFreePlay: boolean; // true right after a Hold On (card 1) — the same player may play any card next, suit rules waived
 }
 
 export interface LogEntry {

@@ -13,19 +13,22 @@ import {
   endTurn,
   getPlayableCards,
   playCard,
+  resolvePickThree,
   topCard,
   voluntaryDraw,
 } from "@/games/whot/engine";
 import { chooseWhotMove, pickSuitToCall, shouldPlayDrawnCard } from "@/games/whot/ai";
 import { REAL_SUITS } from "@/games/whot/types";
-import type { WhotCard, WhotGameState, WhotPlayer, WhotSuit } from "@/games/whot/types";
+import type { WhotGameState, WhotPlayer, WhotSuit } from "@/games/whot/types";
 
 const WAGER = 0.5;
 const OPPONENT_PROFILE: StrategyProfile = "balanced";
+const AI_MOVE_DELAY = 2500;
 
 type Action =
   | { type: "PLAY"; who: WhotPlayer; cardId: string; suit?: string }
   | { type: "VOLUNTARY_DRAW"; who: WhotPlayer }
+  | { type: "RESOLVE_PICK_THREE"; who: WhotPlayer }
   | { type: "END_TURN" }
   | { type: "RESET" };
 
@@ -35,6 +38,8 @@ function reducer(state: WhotGameState, action: Action): WhotGameState {
       return playCard(state, action.who, action.cardId, action.suit).state;
     case "VOLUNTARY_DRAW":
       return voluntaryDraw(state, action.who);
+    case "RESOLVE_PICK_THREE":
+      return resolvePickThree(state, action.who);
     case "END_TURN":
       return endTurn(state);
     case "RESET":
@@ -56,7 +61,7 @@ function WhotGameContainer() {
   const [mode, setMode] = useState<PlayMode | null>(null);
 
   if (!mode) {
-    return <ModeSelect gameName="Whot" wagerLabel={`${WAGER} RITUAL`} onStart={setMode} />;
+    return <ModeSelect gameName="Whot" wagerLabel={`${WAGER} RITUAL`} onStart={setMode} showVoicePicker />;
   }
 
   return <WhotBoard mode={mode} onExit={() => setMode(null)} />;
@@ -68,6 +73,7 @@ function WhotBoard({ mode, onExit }: { mode: PlayMode; onExit: () => void }) {
   const [state, dispatch] = useReducer(reducer, undefined, createWhotGame);
   const [pendingWhotCardId, setPendingWhotCardId] = useState<string | null>(null);
   const stateRef = useRef(state);
+  const prevStateRef = useRef(state);
   const timeoutRef = useRef<number | null>(null);
   const recordedRef = useRef(false);
   const logEndRef = useRef<HTMLDivElement | null>(null);
@@ -83,20 +89,41 @@ function WhotBoard({ mode, onExit }: { mode: PlayMode; onExit: () => void }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function announceCard(card: WhotCard, who: WhotPlayer) {
-    playSfx("click");
-    if (who === "player") {
-      if (card.suit === "Whot") speak("Whot! Call your suit!");
-      else if (card.number === 2) speak("Pick Two!");
-      else if (card.number === 5) speak("Pick Three!");
-      else if (card.number === 8) speak("Suspension!");
-      else if (card.number === 14) speak("General Market!");
-      else if (card.number === 1) speak("Hold On!");
-    } else {
-      if (card.number === 2) speak("Opponent says Pick Two! Pick your cards!");
-      else if (card.number === 14) speak("General Market! Everyone picks!");
+  // Announces only the exact moments the voice system cares about, by diffing each state
+  // transition — this covers every dispatch path (manual click, AI orchestration, drawn-card
+  // auto-play) from one place instead of scattering speak() calls at every call site.
+  useEffect(() => {
+    const prev = prevStateRef.current;
+    if (prev !== state) {
+      const actor = prev.turn;
+      if (state.discard.length === prev.discard.length + 1) {
+        const played = state.discard[state.discard.length - 1];
+        if (played.suit === "Whot" && state.calledSuit) {
+          speak(actor === "player" ? `I need ${state.calledSuit}` : `Give me ${state.calledSuit}`);
+        } else if (played.number === 2) {
+          speak("Pick Two!");
+        } else if (played.number === 5) {
+          speak("Pick Three!");
+        } else if (played.number === 8) {
+          speak("Skip you!");
+        } else if (played.number === 14) {
+          speak("General Market!");
+        } else if (played.number === 1) {
+          speak("Hold On!");
+        }
+
+        if (state.status === "playing" && state.hands[actor].length === 1) {
+          speak(actor === "player" ? "Check up!" : "Opponent check up!");
+        }
+      }
+
+      if (prev.turn !== state.turn && state.status === "playing" && state.hands[state.turn].length === 1) {
+        speak(state.turn === "player" ? "Last card!" : "Opponent last card!");
+      }
+
+      prevStateRef.current = state;
     }
-  }
+  }, [state, speak]);
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -117,12 +144,18 @@ function WhotBoard({ mode, onExit }: { mode: PlayMode; onExit: () => void }) {
     timeoutRef.current = window.setTimeout(() => {
       const s = stateRef.current;
       if (s.status !== "playing" || s.turn !== who) return;
+
+      if (s.pendingPickThree > 0 && getPlayableCards(s, who).length === 0) {
+        playSfx("whoosh");
+        dispatch({ type: "RESOLVE_PICK_THREE", who });
+        return;
+      }
+
       const profile = who === "ai" ? OPPONENT_PROFILE : aiProfile;
       const move = chooseWhotMove(s, who, profile);
 
       if (move.action === "play") {
-        const card = s.hands[who].find((c) => c.id === move.cardId);
-        if (card) announceCard(card, who);
+        playSfx("click");
         dispatch({ type: "PLAY", who, cardId: move.cardId, suit: move.suit });
         return;
       }
@@ -135,13 +168,13 @@ function WhotBoard({ mode, onExit }: { mode: PlayMode; onExit: () => void }) {
         const drawnCard = shouldPlayDrawnCard(s2, who);
         if (drawnCard) {
           const suit = drawnCard.suit === "Whot" ? pickSuitToCall(s2.hands[who], profile) : undefined;
-          announceCard(drawnCard, who);
+          playSfx("click");
           dispatch({ type: "PLAY", who, cardId: drawnCard.id, suit });
         } else {
           dispatch({ type: "END_TURN" });
         }
-      }, 650);
-    }, 900);
+      }, AI_MOVE_DELAY);
+    }, AI_MOVE_DELAY);
 
     return () => {
       if (timeoutRef.current) window.clearTimeout(timeoutRef.current);
@@ -155,10 +188,10 @@ function WhotBoard({ mode, onExit }: { mode: PlayMode; onExit: () => void }) {
     recordedRef.current = true;
     if (state.status === "player_won") {
       playSfx("win");
-      speak("Congratulations! You win!");
+      speak("You win!");
     } else {
       playSfx("lose");
-      speak("Game over! Better luck next time!");
+      speak("Game over!");
     }
     recordMatch({
       game: "whot",
@@ -181,12 +214,11 @@ function WhotBoard({ mode, onExit }: { mode: PlayMode; onExit: () => void }) {
     const card = state.hands.player.find((c) => c.id === cardId);
     const playable = playerPlayable.some((c) => c.id === cardId);
     if (!playable || !card) return;
+    playSfx("click");
     if (isWhot) {
-      announceCard(card, "player");
       setPendingWhotCardId(cardId);
       return;
     }
-    announceCard(card, "player");
     dispatch({ type: "PLAY", who: "player", cardId, suit });
   }
 
@@ -198,8 +230,11 @@ function WhotBoard({ mode, onExit }: { mode: PlayMode; onExit: () => void }) {
 
   function handlePlayerDraw() {
     playSfx("whoosh");
-    speak("Pick from market");
-    dispatch({ type: "VOLUNTARY_DRAW", who: "player" });
+    if (state.pendingPickThree > 0) {
+      dispatch({ type: "RESOLVE_PICK_THREE", who: "player" });
+    } else {
+      dispatch({ type: "VOLUNTARY_DRAW", who: "player" });
+    }
   }
 
   function resetHand() {
@@ -268,6 +303,16 @@ function WhotBoard({ mode, onExit }: { mode: PlayMode; onExit: () => void }) {
                   Called: {state.calledSuit}
                 </div>
               )}
+              {state.pendingPickThree > 0 && (
+                <div className="chip chip-gold" style={{ marginTop: "0.75rem" }}>
+                  Pick Three pending — draw {state.pendingPickThree} or defend with a 5
+                </div>
+              )}
+              {state.holdOnFreePlay && (
+                <div className="chip chip-green" style={{ marginTop: "0.75rem" }}>
+                  Hold On — play again, any suit
+                </div>
+              )}
             </div>
           </div>
 
@@ -275,7 +320,7 @@ function WhotBoard({ mode, onExit }: { mode: PlayMode; onExit: () => void }) {
             <div style={{ display: "flex", justifyContent: "center", gap: "0.75rem", marginBottom: "1.5rem" }}>
               {canDraw && (
                 <button type="button" className="btn btn-gold" onClick={handlePlayerDraw}>
-                  Draw Card
+                  {state.pendingPickThree > 0 ? `Draw ${state.pendingPickThree} (Pick Three)` : "Draw Card"}
                 </button>
               )}
               {canPass && (

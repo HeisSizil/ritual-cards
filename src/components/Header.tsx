@@ -1,6 +1,7 @@
 import { NavLink } from "react-router-dom";
 import { useUsername } from "@/context/UsernameContext";
 import { SoundToggleButton } from "@/components/SoundToggleButton";
+import { VolumePanel } from "@/components/VolumePanel";
 
 const NAV = [
   { to: "/whot", label: "Whot" },
@@ -58,6 +59,7 @@ export function Header() {
 
         <div style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: "0.6rem" }}>
           <SoundToggleButton />
+          <VolumePanel />
           {username ? (
             <div className="chip chip-green" title="Signed in locally">
               <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--green)" }} className="pulse-dot" />

@@ -26,15 +26,15 @@ function tone(ctx: AudioContext, freq: number, start: number, duration: number, 
   osc.stop(start + duration + 0.02);
 }
 
-export function playClickSound() {
+export function playClickSound(volume = 1) {
   const ctx = getAudioCtx();
-  if (!ctx) return;
-  tone(ctx, 920, ctx.currentTime, 0.07, "square", 0.16);
+  if (!ctx || volume <= 0) return;
+  tone(ctx, 920, ctx.currentTime, 0.07, "square", 0.16 * volume);
 }
 
-export function playWhooshSound() {
+export function playWhooshSound(volume = 1) {
   const ctx = getAudioCtx();
-  if (!ctx) return;
+  if (!ctx || volume <= 0) return;
   const t = ctx.currentTime;
   const duration = 0.28;
   const buffer = ctx.createBuffer(1, Math.floor(ctx.sampleRate * duration), ctx.sampleRate);
@@ -50,7 +50,7 @@ export function playWhooshSound() {
   filter.frequency.setValueAtTime(500, t);
   filter.frequency.exponentialRampToValueAtTime(2200, t + duration);
   const gain = ctx.createGain();
-  gain.gain.setValueAtTime(0.22, t);
+  gain.gain.setValueAtTime(0.22 * volume, t);
   gain.gain.exponentialRampToValueAtTime(0.0001, t + duration);
   noise.connect(filter);
   filter.connect(gain);
@@ -59,26 +59,37 @@ export function playWhooshSound() {
   noise.stop(t + duration + 0.02);
 }
 
-export function playWinSound() {
+export function playWinSound(volume = 1) {
   const ctx = getAudioCtx();
-  if (!ctx) return;
+  if (!ctx || volume <= 0) return;
   const t = ctx.currentTime;
   const notes = [523.25, 659.25, 783.99, 1046.5]; // C5 -> E5 -> G5 -> C6, ascending
-  notes.forEach((freq, i) => tone(ctx, freq, t + i * 0.13, 0.26, "triangle", 0.2));
+  notes.forEach((freq, i) => tone(ctx, freq, t + i * 0.13, 0.26, "triangle", 0.2 * volume));
 }
 
-export function playLoseSound() {
+export function playLoseSound(volume = 1) {
   const ctx = getAudioCtx();
-  if (!ctx) return;
+  if (!ctx || volume <= 0) return;
   const t = ctx.currentTime;
   const notes = [523.25, 440, 349.23, 261.63]; // C5 -> A4 -> F4 -> C4, descending
-  notes.forEach((freq, i) => tone(ctx, freq, t + i * 0.16, 0.32, "sawtooth", 0.16));
+  notes.forEach((freq, i) => tone(ctx, freq, t + i * 0.16, 0.32, "sawtooth", 0.16 * volume));
 }
 
-export function speakText(text: string) {
+export interface SpeakOptions {
+  voice?: SpeechSynthesisVoice | null;
+  volume?: number; // 0..1
+  rate?: number;
+  pitch?: number;
+}
+
+export function speakText(text: string, options: SpeakOptions = {}) {
   if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
+  const volume = options.volume ?? 1;
+  if (volume <= 0) return;
   const utterance = new SpeechSynthesisUtterance(text);
-  utterance.rate = 1.1;
-  utterance.pitch = 1.0;
+  utterance.rate = options.rate ?? 1.1;
+  utterance.pitch = options.pitch ?? 1.0;
+  utterance.volume = Math.min(1, Math.max(0, volume));
+  if (options.voice) utterance.voice = options.voice;
   window.speechSynthesis.speak(utterance);
 }

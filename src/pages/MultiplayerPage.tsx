@@ -7,7 +7,7 @@ import { useUsername } from "@/context/UsernameContext";
 import { supabase, generateRoomCode, getPersistentPlayerId } from "@/lib/supabase";
 import { recordMatch } from "@/lib/storage";
 import { STRATEGIES, strategyMeta, type StrategyProfile } from "@/lib/aiStrategy";
-import { createWhotGame, endTurn, getPlayableCards, playCard, topCard, voluntaryDraw } from "@/games/whot/engine";
+import { createWhotGame, endTurn, getPlayableCards, playCard, resolvePickThree, topCard, voluntaryDraw } from "@/games/whot/engine";
 import { chooseWhotMove, pickSuitToCall, shouldPlayDrawnCard } from "@/games/whot/ai";
 import { REAL_SUITS } from "@/games/whot/types";
 import type { WhotGameState, WhotPlayer, WhotSuit } from "@/games/whot/types";
@@ -22,6 +22,7 @@ interface RoomState {
 }
 
 const WAGER = 0.5;
+const AI_ASSIST_MOVE_DELAY = 2500;
 
 export function MultiplayerPage() {
   return (
@@ -300,6 +301,12 @@ function RoomView({
       const current = roomRef.current;
       if (current.game.turn !== mySeat || current.game.status !== "playing") return;
       const profile = current.aiProfile[mySeat];
+
+      if (current.game.pendingPickThree > 0 && getPlayableCards(current.game, mySeat).length === 0) {
+        onWriteRoom({ ...current, game: resolvePickThree(current.game, mySeat) });
+        return;
+      }
+
       const move = chooseWhotMove(current.game, mySeat, profile);
       if (move.action === "play") {
         const { state: nextGame } = playCard(current.game, mySeat, move.cardId, move.suit);
@@ -319,8 +326,8 @@ function RoomView({
         } else {
           onWriteRoom({ ...c2, game: endTurn(c2.game) });
         }
-      }, 700);
-    }, 1000);
+      }, AI_ASSIST_MOVE_DELAY);
+    }, AI_ASSIST_MOVE_DELAY);
 
     return () => {
       if (timeoutRef.current) window.clearTimeout(timeoutRef.current);
@@ -352,6 +359,14 @@ function RoomView({
   function play(cardId: string, suit?: string) {
     const { state: nextGame } = playCard(game, mySeat, cardId, suit);
     onWriteRoom({ ...room, game: nextGame });
+  }
+
+  function drawOrResolve() {
+    if (game.pendingPickThree > 0) {
+      onWriteRoom({ ...room, game: resolvePickThree(game, mySeat) });
+    } else {
+      onWriteRoom({ ...room, game: voluntaryDraw(game, mySeat) });
+    }
   }
 
   function handleClick(cardId: string, isWhot: boolean) {
@@ -446,7 +461,7 @@ function RoomView({
                   </div>
                   <button
                     type="button"
-                    onClick={() => canDraw && onWriteRoom({ ...room, game: voluntaryDraw(game, mySeat) })}
+                    onClick={() => canDraw && drawOrResolve()}
                     disabled={!canDraw}
                     style={{ background: "none", border: "none", padding: 0, cursor: canDraw ? "pointer" : "default" }}
                     aria-label="Draw a card"
@@ -464,14 +479,24 @@ function RoomView({
                       Called: {game.calledSuit}
                     </div>
                   )}
+                  {game.pendingPickThree > 0 && (
+                    <div className="chip chip-gold" style={{ marginTop: "0.75rem" }}>
+                      Pick Three pending — draw {game.pendingPickThree} or defend with a 5
+                    </div>
+                  )}
+                  {game.holdOnFreePlay && (
+                    <div className="chip chip-green" style={{ marginTop: "0.75rem" }}>
+                      Hold On — play again, any suit
+                    </div>
+                  )}
                 </div>
               </div>
 
               {(canDraw || canPass) && (
                 <div style={{ display: "flex", justifyContent: "center", gap: "0.75rem", marginBottom: "1.5rem" }}>
                   {canDraw && (
-                    <button type="button" className="btn btn-gold" onClick={() => onWriteRoom({ ...room, game: voluntaryDraw(game, mySeat) })}>
-                      Draw Card
+                    <button type="button" className="btn btn-gold" onClick={drawOrResolve}>
+                      {game.pendingPickThree > 0 ? `Draw ${game.pendingPickThree} (Pick Three)` : "Draw Card"}
                     </button>
                   )}
                   {canPass && (
