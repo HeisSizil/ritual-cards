@@ -198,9 +198,11 @@ export function playCard(state: WhotGameState, who: WhotPlayer, cardId: string, 
       return { state: next, requiresSuitCall: false };
     }
     case 14: {
+      // General Market: every opponent draws one, then the same player goes again — they must
+      // follow suit/number of this 14 (or play another 14, chaining the market again) until they
+      // play a non-14 card, at which point the turn finally passes.
       next = drawCards(next, other(who), 1);
-      next.log = [...next.log, log(`General Market — ${other(who) === "player" ? "you" : "AI"} picked up a card.`, "special")];
-      next = endTurn(next);
+      next.log = [...next.log, log(`General Market — ${other(who) === "player" ? "you" : "AI"} picked up a card. ${actorLabel} plays again.`, "special")];
       return { state: next, requiresSuitCall: false };
     }
     default: {

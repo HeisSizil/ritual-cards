@@ -204,8 +204,9 @@ function WhotBoard({ mode, onExit }: { mode: PlayMode; onExit: () => void }) {
   const top = topCard(state);
   const playerPlayable = getPlayableCards(state, "player");
   const isPlayerManualTurn = state.turn === "player" && !playerIsAiControlled && state.status === "playing";
-  const canDraw = isPlayerManualTurn && playerPlayable.length === 0 && !state.hasDrawnThisTurn;
-  const canPass = isPlayerManualTurn && playerPlayable.length === 0 && state.hasDrawnThisTurn;
+  // Standard Whot: a player may always choose to draw instead of playing, even with a valid card
+  // in hand. Drawing this way (voluntary or forced) always ends the turn immediately.
+  const canVoluntaryDraw = isPlayerManualTurn && !state.hasDrawnThisTurn;
 
   function handlePlayerCardClick(cardId: string, suit: string, isWhot: boolean) {
     if (!isPlayerManualTurn) return;
@@ -232,6 +233,7 @@ function WhotBoard({ mode, onExit }: { mode: PlayMode; onExit: () => void }) {
       dispatch({ type: "RESOLVE_PICK_THREE", who: "player" });
     } else {
       dispatch({ type: "VOLUNTARY_DRAW", who: "player" });
+      dispatch({ type: "END_TURN" });
     }
   }
 
@@ -283,9 +285,9 @@ function WhotBoard({ mode, onExit }: { mode: PlayMode; onExit: () => void }) {
               </div>
               <button
                 type="button"
-                onClick={() => canDraw && handlePlayerDraw()}
-                disabled={!canDraw}
-                style={{ background: "none", border: "none", padding: 0, cursor: canDraw ? "pointer" : "default" }}
+                onClick={() => canVoluntaryDraw && handlePlayerDraw()}
+                disabled={!canVoluntaryDraw}
+                style={{ background: "none", border: "none", padding: 0, cursor: canVoluntaryDraw ? "pointer" : "default" }}
                 aria-label="Draw a card"
               >
                 <CardBackView />
@@ -314,18 +316,11 @@ function WhotBoard({ mode, onExit }: { mode: PlayMode; onExit: () => void }) {
             </div>
           </div>
 
-          {(canDraw || canPass) && (
+          {canVoluntaryDraw && (
             <div style={{ display: "flex", justifyContent: "center", gap: "0.75rem", marginBottom: "1.5rem" }}>
-              {canDraw && (
-                <button type="button" className="btn btn-gold" onClick={handlePlayerDraw}>
-                  {state.pendingPickThree > 0 ? `Draw ${state.pendingPickThree} (Pick Three)` : "Draw Card"}
-                </button>
-              )}
-              {canPass && (
-                <button type="button" className="btn btn-ghost" onClick={() => dispatch({ type: "END_TURN" })}>
-                  Pass Turn
-                </button>
-              )}
+              <button type="button" className="btn btn-gold" onClick={handlePlayerDraw}>
+                {state.pendingPickThree > 0 ? `Draw ${state.pendingPickThree} (Pick Three)` : "Draw from Market"}
+              </button>
             </div>
           )}
 
