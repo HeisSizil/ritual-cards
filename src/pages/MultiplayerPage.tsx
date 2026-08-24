@@ -772,8 +772,9 @@ function RoomView({
   const opponents = room.seats.filter((s) => s.id !== mySeatId && game.players.includes(s.id));
   const myPlayable = getPlayableCards(game, mySeatId);
   const isManualMyTurn = status === "active" && game.status === "playing" && game.turn === mySeatId && !room.aiAssist[mySeatId];
-  const canDraw = isManualMyTurn && myPlayable.length === 0 && !game.hasDrawnThisTurn;
-  const canPass = isManualMyTurn && myPlayable.length === 0 && game.hasDrawnThisTurn;
+  // Standard Whot: a player may always choose to draw instead of playing, even with a valid card
+  // in hand. Drawing this way (voluntary or forced) always ends the turn immediately.
+  const canVoluntaryDraw = isManualMyTurn && !game.hasDrawnThisTurn;
   const top = topCard(game);
 
   function play(cardId: string, suit?: string) {
@@ -783,13 +784,13 @@ function RoomView({
     onWriteRoom({ ...room, game: nextGame });
   }
 
-  function drawOrResolve() {
+  function handleDraw() {
     if (!game) return;
     playSfx("whoosh");
     if (game.pendingPickThree > 0) {
       onWriteRoom({ ...room, game: resolvePickThree(game, mySeatId) });
     } else {
-      onWriteRoom({ ...room, game: voluntaryDraw(game, mySeatId) });
+      onWriteRoom({ ...room, game: endTurn(voluntaryDraw(game, mySeatId)) });
     }
   }
 
@@ -884,9 +885,9 @@ function RoomView({
               </div>
               <button
                 type="button"
-                onClick={() => canDraw && drawOrResolve()}
-                disabled={!canDraw}
-                style={{ background: "none", border: "none", padding: 0, cursor: canDraw ? "pointer" : "default" }}
+                onClick={() => canVoluntaryDraw && handleDraw()}
+                disabled={!canVoluntaryDraw}
+                style={{ background: "none", border: "none", padding: 0, cursor: canVoluntaryDraw ? "pointer" : "default" }}
                 aria-label="Draw a card"
               >
                 <CardBackView />
@@ -915,18 +916,11 @@ function RoomView({
             </div>
           </div>
 
-          {(canDraw || canPass) && (
+          {canVoluntaryDraw && (
             <div style={{ display: "flex", justifyContent: "center", gap: "0.75rem", marginBottom: "1.5rem" }}>
-              {canDraw && (
-                <button type="button" className="btn btn-gold" onClick={drawOrResolve}>
-                  {game.pendingPickThree > 0 ? `Draw ${game.pendingPickThree} (Pick Three)` : "Draw Card"}
-                </button>
-              )}
-              {canPass && (
-                <button type="button" className="btn btn-ghost" onClick={() => onWriteRoom({ ...room, game: endTurn(game) })}>
-                  Pass Turn
-                </button>
-              )}
+              <button type="button" className="btn btn-gold" onClick={handleDraw}>
+                {game.pendingPickThree > 0 ? `Draw ${game.pendingPickThree} (Pick Three)` : "Draw from Market"}
+              </button>
             </div>
           )}
 
