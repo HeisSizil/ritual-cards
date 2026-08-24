@@ -59,17 +59,26 @@ function MultiplayerContainer() {
   const channelRef = useRef<RealtimeChannel | null>(null);
   const recordedRef = useRef(false);
 
-  const subscribe = useCallback((id: string) => {
-    channelRef.current?.unsubscribe();
+  const subscribe = useCallback((code: string) => {
+    if (channelRef.current) {
+      supabase.removeChannel(channelRef.current);
+      channelRef.current = null;
+    }
+
+    const refetch = async () => {
+      const { data, error: err } = await supabase.from("games").select("*").eq("room_code", code).single();
+      if (err || !data) return;
+      setStatus(data.status);
+      setRoom(data.game_state as RoomState);
+    };
+
     const channel = supabase
-      .channel(`room-${id}`)
+      .channel(`room-${code}`)
       .on(
         "postgres_changes",
-        { event: "UPDATE", schema: "public", table: "games", filter: `id=eq.${id}` },
-        (payload) => {
-          const row = payload.new as { status: "waiting" | "active" | "finished"; game_state: RoomState };
-          setStatus(row.status);
-          setRoom(row.game_state);
+        { event: "*", schema: "public", table: "games", filter: `room_code=eq.${code}` },
+        () => {
+          refetch();
         },
       )
       .subscribe();
@@ -78,7 +87,7 @@ function MultiplayerContainer() {
 
   useEffect(() => {
     return () => {
-      channelRef.current?.unsubscribe();
+      if (channelRef.current) supabase.removeChannel(channelRef.current);
     };
   }, []);
 
@@ -112,7 +121,7 @@ function MultiplayerContainer() {
       setMySeatId("seat-0");
       setStatus("waiting");
       setRoom(initialRoom);
-      subscribe(data.id);
+      subscribe(code);
       setScreen("room");
     } catch (e) {
       setError(supabaseErrorMessage(e));
@@ -164,7 +173,7 @@ function MultiplayerContainer() {
       setMySeatId(seatId);
       setStatus(data.status);
       setRoom(data.game_state as RoomState);
-      subscribe(data.id);
+      subscribe(code);
       setScreen("room");
     } catch (e) {
       setError(supabaseErrorMessage(e));
@@ -211,7 +220,10 @@ function MultiplayerContainer() {
   }
 
   function leaveRoom() {
-    channelRef.current?.unsubscribe();
+    if (channelRef.current) {
+      supabase.removeChannel(channelRef.current);
+      channelRef.current = null;
+    }
     setScreen("choose");
     setRoomId(null);
     setRoom(null);
