@@ -2,9 +2,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 import { UsernameGate } from "@/components/UsernameGate";
 import { ResultOverlay } from "@/components/ResultOverlay";
+import { SoundToggleButton } from "@/components/SoundToggleButton";
 import { WhotCardView, CardBackView } from "@/components/cards/WhotCardView";
 import { WhotIntro } from "@/components/whot/WhotIntro";
 import { useUsername } from "@/context/UsernameContext";
+import { useSound } from "@/context/SoundContext";
 import { supabase, generateRoomCode, getPersistentPlayerId } from "@/lib/supabase";
 import { recordMatch } from "@/lib/storage";
 import { STRATEGIES, strategyMeta, type StrategyProfile } from "@/lib/aiStrategy";
@@ -12,6 +14,7 @@ import { createWhotGame, endTurn, getPlayableCards, playCard, resolvePickThree, 
 import { chooseWhotMove, pickSuitToCall, shouldPlayDrawnCard } from "@/games/whot/ai";
 import { REAL_SUITS } from "@/games/whot/types";
 import type { WhotGameState, WhotPlayer, WhotSuit } from "@/games/whot/types";
+import { applyRoundResult, computeRoundResult, createTournament, handScore, type RoundResult, type TournamentState } from "@/games/whot/tournament";
 
 type SeatId = WhotPlayer;
 
@@ -27,12 +30,14 @@ interface RoomState {
   game: WhotGameState | null; // null while the room is still in the lobby
   aiAssist: Record<SeatId, boolean>;
   aiProfile: Record<SeatId, StrategyProfile>;
+  tournament: TournamentState | null; // set when the table started with 3+ players (Highest Hand Knockout)
 }
 
 const WAGER = 0.5;
 const AI_ASSIST_MOVE_DELAY = 2500;
 const MIN_PLAYERS = 2;
 const MAX_PLAYERS = 10;
+const KNOCKOUT_MIN_PLAYERS = 3;
 
 export function MultiplayerPage() {
   return (
@@ -45,6 +50,15 @@ export function MultiplayerPage() {
 function MultiplayerContainer() {
   const { username } = useUsername();
   const playerId = useRef(getPersistentPlayerId()).current;
+  const { playMusic, stopMusic, speak, playSfx } = useSound();
+
+  // Background music is armed the moment a player enters the multiplayer lobby, and the
+  // SoundContext unlock listener starts it on the very first click/tap anywhere on the page.
+  useEffect(() => {
+    playMusic();
+    return () => stopMusic();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const [screen, setScreen] = useState<"choose" | "room">("choose");
   const [joinCode, setJoinCode] = useState("");
@@ -103,6 +117,7 @@ function MultiplayerContainer() {
         game: null,
         aiAssist: {},
         aiProfile: {},
+        tournament: null,
       };
       const { data, error: err } = await supabase
         .from("games")
@@ -208,6 +223,7 @@ function MultiplayerContainer() {
       game,
       aiAssist: Object.fromEntries(seatIds.map((id) => [id, false])),
       aiProfile: Object.fromEntries(seatIds.map((id) => [id, "balanced" as StrategyProfile])),
+      tournament: seatIds.length >= KNOCKOUT_MIN_PLAYERS ? createTournament(seatIds) : null,
     };
     setRoom(next);
     setStatus("active");
@@ -298,6 +314,8 @@ function MultiplayerContainer() {
       onStartGame={startGame}
       onLeave={leaveRoom}
       recordedRef={recordedRef}
+      speak={speak}
+      playSfx={playSfx}
     />
   );
 }
@@ -359,6 +377,8 @@ function RoomView({
   onStartGame,
   onLeave,
   recordedRef,
+  speak,
+  playSfx,
 }: {
   room: RoomState;
   status: "waiting" | "active" | "finished";
@@ -370,12 +390,16 @@ function RoomView({
   onStartGame: () => void;
   onLeave: () => void;
   recordedRef: React.MutableRefObject<boolean>;
+  speak: (text: string) => void;
+  playSfx: (type: "click" | "whoosh" | "win" | "lose") => void;
 }) {
   const roomRef = useRef(room);
   const timeoutRef = useRef<number | null>(null);
   const [pendingWhotCardId, setPendingWhotCardId] = useState<string | null>(null);
   const [showIntro, setShowIntro] = useState(false);
   const hadGameRef = useRef(!!room.game);
+  const prevGameRef = useRef<WhotGameState | null>(room.game);
+  const processedFinishRef = useRef<WhotGameState | null>(null);
 
   useEffect(() => {
     roomRef.current = room;
@@ -393,6 +417,103 @@ function RoomView({
   const isHost = room.hostPlayerId === playerId;
 
   const game = room.game;
+  const tournament = room.tournament ?? null;
+  const amIEliminated = !!tournament?.eliminated.some((e) => e.seatId === mySeatId);
+
+  // Announces game events by diffing each synced state transition -- runs identically on every
+  // player's device, so everyone hears the moves that just happened regardless of who made them.
+  useEffect(() => {
+    const prev = prevGameRef.current;
+    if (game && prev !== game) {
+      if (prev && game.discard.length === prev.discard.length + 1) {
+        const actor = prev.turn;
+        const isMe = actor === mySeatId;
+        const played = game.discard[game.discard.length - 1];
+        if (played.suit === "Whot" && game.calledSuit) {
+          speak(isMe ? `I need ${game.calledSuit}` : `${seatName(actor)} needs ${game.calledSuit}`);
+        } else if (played.number === 2) {
+          speak("Pick Two!");
+        } else if (played.number === 5) {
+          speak("Pick Three!");
+        } else if (played.number === 8) {
+          speak("Skip you!");
+        } else if (played.number === 14) {
+          speak("General Market!");
+        } else if (played.number === 1) {
+          speak("Hold On!");
+        }
+
+        const actorHand = game.hands[actor];
+        if (actorHand && actorHand.length === 0) {
+          speak(isMe ? "Check up!" : `${seatName(actor)} check up!`);
+        } else if (actorHand && actorHand.length === 1) {
+          speak(isMe ? "Last card!" : `${seatName(actor)} last card!`);
+        }
+      }
+      prevGameRef.current = game;
+    }
+  }, [game, mySeatId, speak]);
+
+  // Announces knockouts the moment a round result becomes visible (once per result, on every device).
+  const announcedResultRef = useRef<RoundResult | null>(null);
+  useEffect(() => {
+    const result = tournament?.lastRoundResult;
+    if (!result || announcedResultRef.current === result) return;
+    announcedResultRef.current = result;
+    if (result.eliminatedSeat) {
+      speak(`${seatName(result.eliminatedSeat)} is knocked out with ${result.scores[result.eliminatedSeat]} points!`);
+    } else {
+      speak("Perfect tie — everyone moves to the next round.");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tournament?.lastRoundResult]);
+
+  useEffect(() => {
+    if (tournament?.champion) {
+      speak(tournament.champion === mySeatId ? "You win the tournament!" : `${seatName(tournament.champion)} wins the tournament!`);
+      playSfx(tournament.champion === mySeatId ? "win" : "lose");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tournament?.champion]);
+
+  // Host resolves each round's outcome exactly once (deterministic from game state, so any double
+  // write from a race would be idempotent, but gating to the host keeps a single writer per room).
+  useEffect(() => {
+    if (!isHost || !tournament || tournament.champion) return;
+    if (!game || game.status !== "finished") return;
+    if (processedFinishRef.current === game) return;
+    processedFinishRef.current = game;
+
+    if (tournament.remainingSeats.length <= 2) {
+      const champion = game.winner;
+      const loser = tournament.remainingSeats.find((s) => s !== champion) ?? null;
+      const eliminated =
+        loser && champion
+          ? [...tournament.eliminated, { seatId: loser, round: tournament.round, score: handScore(game.hands[loser] ?? []) }]
+          : tournament.eliminated;
+      onWriteRoom({
+        ...roomRef.current,
+        tournament: {
+          ...tournament,
+          champion,
+          remainingSeats: champion ? [champion] : tournament.remainingSeats,
+          eliminated,
+          lastRoundResult: null,
+        },
+      });
+      return;
+    }
+
+    const result = computeRoundResult(game, tournament.round);
+    onWriteRoom({ ...roomRef.current, tournament: applyRoundResult(tournament, result) });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [game, isHost, tournament]);
+
+  function startNextRound() {
+    if (!tournament) return;
+    const newGame = createWhotGame(tournament.remainingSeats);
+    onWriteRoom({ ...room, game: newGame, tournament: { ...tournament, round: tournament.round + 1, lastRoundResult: null } });
+  }
 
   // Drive my own seat's auto-play when I've enabled "let AI play for me".
   useEffect(() => {
@@ -438,10 +559,29 @@ function RoomView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [room, status, mySeatId, game]);
 
+  // Records once the match is truly decided -- for a knockout table that's the tournament champion,
+  // not any individual round's "safe" winner (a round ending isn't a win/loss by itself).
   useEffect(() => {
-    if (!game || game.status === "playing" || recordedRef.current) return;
+    if (!game) return;
+    if (tournament) {
+      if (!tournament.champion || recordedRef.current) return;
+      recordedRef.current = true;
+      const won = tournament.champion === mySeatId;
+      const opponents = room.seats.filter((s) => s.id !== mySeatId).map((s) => s.name);
+      recordMatch({
+        game: "whot",
+        result: won ? "win" : "loss",
+        wager: WAGER,
+        opponent: opponents.join(", ") || "Opponent",
+        aiAssisted: room.aiAssist[mySeatId] ?? false,
+      });
+      return;
+    }
+    if (game.status === "playing" || recordedRef.current) return;
     recordedRef.current = true;
     const won = game.winner === mySeatId;
+    playSfx(won ? "win" : "lose");
+    speak(won ? "You win!" : "Game over!");
     const opponents = room.seats.filter((s) => s.id !== mySeatId).map((s) => s.name);
     recordMatch({
       game: "whot",
@@ -451,7 +591,7 @@ function RoomView({
       aiAssisted: room.aiAssist[mySeatId] ?? false,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [game?.status]);
+  }, [game?.status, tournament?.champion]);
 
   if (showIntro && game) {
     return (
@@ -470,9 +610,12 @@ function RoomView({
           <span className="chip">
             Room <span className="mono">{roomCode}</span>
           </span>
-          <button type="button" className="btn btn-ghost btn-sm" onClick={onLeave}>
-            Leave room
-          </button>
+          <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+            <SoundToggleButton />
+            <button type="button" className="btn btn-ghost btn-sm" onClick={onLeave}>
+              Leave room
+            </button>
+          </div>
         </div>
 
         <div className="panel" style={{ padding: "2.5rem", textAlign: "center", marginBottom: "1.5rem" }}>
@@ -507,7 +650,126 @@ function RoomView({
     );
   }
 
-  const opponents = room.seats.filter((s) => s.id !== mySeatId);
+  // Tournament decided -- show the champion and final standings.
+  if (tournament?.champion) {
+    const won = tournament.champion === mySeatId;
+    return (
+      <div className="container section" style={{ paddingBottom: "3rem" }}>
+        <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: "0.75rem", marginBottom: "1.5rem" }}>
+          <span className="chip">
+            Room <span className="mono">{roomCode}</span>
+          </span>
+          <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+            <SoundToggleButton />
+            <button type="button" className="btn btn-ghost btn-sm" onClick={onLeave}>
+              Leave room
+            </button>
+          </div>
+        </div>
+        <TournamentStandings tournament={tournament} seatName={seatName} mySeatId={mySeatId} />
+        <ResultOverlay
+          won={won}
+          title={won ? "Tournament Champion!" : `${seatName(tournament.champion)} Wins the Tournament`}
+          subtitle={won ? "You outlasted the whole table." : `${seatName(tournament.champion)} was the last player standing.`}
+          payoutText={won ? `${(WAGER * room.seats.length).toFixed(2)} RITUAL to your wallet` : "Better luck next tournament"}
+          onPlayAgain={() => {
+            recordedRef.current = false;
+            processedFinishRef.current = null;
+            const seatIds = room.seats.map((s) => s.id);
+            onWriteRoom({
+              ...room,
+              game: createWhotGame(seatIds),
+              tournament: seatIds.length >= KNOCKOUT_MIN_PLAYERS ? createTournament(seatIds) : null,
+            });
+            setShowIntro(true);
+          }}
+          onExit={onLeave}
+        />
+      </div>
+    );
+  }
+
+  // A round just ended and the host hasn't dealt the next one yet -- show the knockout result.
+  if (tournament && game.status === "finished" && tournament.lastRoundResult) {
+    const result = tournament.lastRoundResult;
+    return (
+      <div className="container section" style={{ paddingBottom: "3rem" }}>
+        <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: "0.75rem", marginBottom: "1.5rem" }}>
+          <span className="chip">
+            Room <span className="mono">{roomCode}</span>
+          </span>
+          <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+            <SoundToggleButton />
+            <button type="button" className="btn btn-ghost btn-sm" onClick={onLeave}>
+              Leave room
+            </button>
+          </div>
+        </div>
+
+        <div className="panel" style={{ padding: "2rem", marginBottom: "1.5rem", textAlign: "center" }}>
+          <div className="chip chip-green" style={{ marginBottom: "1rem" }}>
+            Round {result.round} complete
+          </div>
+          <h2 style={{ fontSize: "1.5rem", marginBottom: "0.5rem" }}>{seatName(result.safeSeat)} emptied their hand</h2>
+          <p style={{ color: "var(--gray-400)", marginBottom: "1.5rem" }}>
+            {result.eliminatedSeat
+              ? `${seatName(result.eliminatedSeat)} had the highest hand and is knocked out.`
+              : "Perfect tie on hand score — nobody is eliminated this round."}
+          </p>
+
+          <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: "0.6rem", marginBottom: "1.5rem" }}>
+            {game.players.map((seatId) => (
+              <span
+                key={seatId}
+                className={`chip ${seatId === result.eliminatedSeat ? "chip-pink" : seatId === result.safeSeat ? "chip-green" : ""}`}
+              >
+                {seatName(seatId)} · {result.scores[seatId] ?? 0} pts
+                {seatId === result.eliminatedSeat ? " · Knocked out" : ""}
+              </span>
+            ))}
+          </div>
+
+          {isHost ? (
+            <button type="button" className="btn btn-primary" onClick={startNextRound}>
+              Start Next Round
+            </button>
+          ) : (
+            <p style={{ color: "var(--gray-400)", fontSize: "0.9rem" }}>Waiting for the host to start the next round…</p>
+          )}
+        </div>
+
+        <TournamentStandings tournament={tournament} seatName={seatName} mySeatId={mySeatId} />
+      </div>
+    );
+  }
+
+  // I've already been knocked out in a previous round -- spectate the standings, not the board.
+  if (tournament && amIEliminated) {
+    return (
+      <div className="container section" style={{ paddingBottom: "3rem" }}>
+        <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: "0.75rem", marginBottom: "1.5rem" }}>
+          <span className="chip">
+            Room <span className="mono">{roomCode}</span>
+          </span>
+          <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+            <SoundToggleButton />
+            <button type="button" className="btn btn-ghost btn-sm" onClick={onLeave}>
+              Leave room
+            </button>
+          </div>
+        </div>
+        <div className="panel" style={{ padding: "2rem", marginBottom: "1.5rem", textAlign: "center" }}>
+          <div className="chip chip-pink" style={{ marginBottom: "1rem" }}>
+            You're knocked out
+          </div>
+          <p style={{ color: "var(--gray-400)" }}>The remaining players are still battling it out. Standings update live below.</p>
+        </div>
+        <TournamentStandings tournament={tournament} seatName={seatName} mySeatId={mySeatId} />
+      </div>
+    );
+  }
+
+  const opponents = room.seats.filter((s) => s.id !== mySeatId && game.players.includes(s.id));
   const myPlayable = getPlayableCards(game, mySeatId);
   const isManualMyTurn = status === "active" && game.status === "playing" && game.turn === mySeatId && !room.aiAssist[mySeatId];
   const canDraw = isManualMyTurn && myPlayable.length === 0 && !game.hasDrawnThisTurn;
@@ -516,12 +778,14 @@ function RoomView({
 
   function play(cardId: string, suit?: string) {
     if (!game) return;
+    playSfx("click");
     const { state: nextGame } = playCard(game, mySeatId, cardId, suit);
     onWriteRoom({ ...room, game: nextGame });
   }
 
   function drawOrResolve() {
     if (!game) return;
+    playSfx("whoosh");
     if (game.pendingPickThree > 0) {
       onWriteRoom({ ...room, game: resolvePickThree(game, mySeatId) });
     } else {
@@ -560,10 +824,18 @@ function RoomView({
             Room <span className="mono">{roomCode}</span>
           </span>
           {room.aiAssist[mySeatId] && <span className="chip chip-pink">AI playing for you · {strategyMeta(room.aiProfile[mySeatId] ?? "balanced").label}</span>}
+          {tournament && (
+            <span className="chip chip-gold">
+              Knockout · Round {tournament.round} · {tournament.remainingSeats.length} left
+            </span>
+          )}
         </div>
-        <button type="button" className="btn btn-ghost btn-sm" onClick={onLeave}>
-          Leave room
-        </button>
+        <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+          <SoundToggleButton />
+          <button type="button" className="btn btn-ghost btn-sm" onClick={onLeave}>
+            Leave room
+          </button>
+        </div>
       </div>
 
       <div className="panel" style={{ padding: "1.25rem", marginBottom: "1.5rem", display: "flex", gap: "1rem", alignItems: "center", flexWrap: "wrap" }}>
@@ -676,24 +948,27 @@ function RoomView({
           </div>
         </div>
 
-        <aside className="panel" style={{ padding: "1rem", maxHeight: 460, display: "flex", flexDirection: "column" }}>
-          <div className="data-label" style={{ marginBottom: "0.75rem" }}>
-            Match Log
-          </div>
-          <div style={{ overflowY: "auto", flex: 1, display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-            {game.log.map((entry) => (
-              <div
-                key={entry.id}
-                style={{
-                  fontSize: "0.8rem",
-                  color: entry.tone === "good" ? "var(--green)" : entry.tone === "bad" ? "var(--red)" : entry.tone === "special" ? "var(--gold)" : "var(--gray-400)",
-                }}
-              >
-                {entry.text}
-              </div>
-            ))}
-          </div>
-        </aside>
+        <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+          {tournament && <TournamentStandings tournament={tournament} seatName={seatName} mySeatId={mySeatId} compact />}
+          <aside className="panel" style={{ padding: "1rem", maxHeight: 460, display: "flex", flexDirection: "column" }}>
+            <div className="data-label" style={{ marginBottom: "0.75rem" }}>
+              Match Log
+            </div>
+            <div style={{ overflowY: "auto", flex: 1, display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+              {game.log.map((entry) => (
+                <div
+                  key={entry.id}
+                  style={{
+                    fontSize: "0.8rem",
+                    color: entry.tone === "good" ? "var(--green)" : entry.tone === "bad" ? "var(--red)" : entry.tone === "special" ? "var(--gold)" : "var(--gray-400)",
+                  }}
+                >
+                  {entry.text}
+                </div>
+              ))}
+            </div>
+          </aside>
+        </div>
       </div>
 
       {pendingWhotCardId && (
@@ -752,6 +1027,52 @@ function SeatLabel({ label, count, active, accent }: { label: string; count: num
           <span style={{ width: 6, height: 6, borderRadius: "50%", background: `var(--${accent})` }} className="pulse-dot" />
           Turn
         </span>
+      )}
+    </div>
+  );
+}
+
+/** Bracket/standings panel for Highest Hand Knockout: who's still in, and who's been knocked out and when. */
+function TournamentStandings({
+  tournament,
+  seatName,
+  mySeatId,
+  compact = false,
+}: {
+  tournament: TournamentState;
+  seatName: (id: SeatId) => string;
+  mySeatId: SeatId;
+  compact?: boolean;
+}) {
+  return (
+    <div className="panel" style={{ padding: compact ? "1rem" : "1.5rem", marginBottom: compact ? 0 : "1.5rem" }}>
+      <div className="data-label" style={{ marginBottom: "0.75rem" }}>
+        {tournament.champion ? "Final Standings" : `Standings · Round ${tournament.round}`}
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", marginBottom: tournament.eliminated.length ? "1rem" : 0 }}>
+        {tournament.remainingSeats.map((seatId) => (
+          <span key={seatId} className={`chip ${seatId === tournament.champion ? "chip-gold" : "chip-green"}`}>
+            {seatId === tournament.champion ? "👑 " : ""}
+            {seatName(seatId)}
+            {seatId === mySeatId ? " (you)" : ""}
+            {tournament.champion ? "" : " · still in"}
+          </span>
+        ))}
+      </div>
+      {tournament.eliminated.length > 0 && (
+        <>
+          <div className="data-label" style={{ marginBottom: "0.5rem" }}>
+            Knocked Out
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
+            {[...tournament.eliminated].reverse().map((e) => (
+              <span key={e.seatId} className="chip" style={{ opacity: 0.75 }}>
+                {seatName(e.seatId)}
+                {e.seatId === mySeatId ? " (you)" : ""} · Round {e.round} · {e.score} pts
+              </span>
+            ))}
+          </div>
+        </>
       )}
     </div>
   );
