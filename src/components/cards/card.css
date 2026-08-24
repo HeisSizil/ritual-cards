@@ -1,0 +1,146 @@
+.playing-card {
+  --card-w: 76px;
+  --card-h: 108px;
+  width: var(--card-w);
+  height: var(--card-h);
+  border-radius: 10px;
+  background: #fdfdfb;
+  color: #14151a;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  box-shadow: 0 6px 16px -6px rgba(0, 0, 0, 0.55), 0 1px 0 rgba(255, 255, 255, 0.5) inset;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 6px 7px;
+  font-family: var(--font-body);
+  user-select: none;
+  flex-shrink: 0;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.playing-card.lg {
+  --card-w: 108px;
+  --card-h: 152px;
+}
+
+.playing-card.sm {
+  --card-w: 56px;
+  --card-h: 80px;
+}
+
+.playing-card.interactive {
+  cursor: pointer;
+}
+.playing-card.interactive:hover {
+  transform: translateY(-10px);
+  box-shadow: 0 16px 28px -10px rgba(25, 209, 132, 0.35), 0 1px 0 rgba(255, 255, 255, 0.5) inset;
+}
+
+.playing-card.disabled {
+  filter: grayscale(0.55) brightness(0.75);
+  cursor: not-allowed;
+}
+.playing-card.disabled:hover {
+  transform: none;
+  box-shadow: 0 6px 16px -6px rgba(0, 0, 0, 0.55);
+}
+
+.playing-card.selected {
+  transform: translateY(-14px);
+  box-shadow: 0 0 0 3px var(--green), 0 16px 28px -10px rgba(25, 209, 132, 0.5);
+}
+
+.playing-card.dealt {
+  animation: dealIn 0.42s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+.card-corner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  line-height: 1;
+  font-weight: 700;
+  font-size: 0.82rem;
+}
+.card-corner.bottom {
+  align-self: flex-end;
+  transform: rotate(180deg);
+}
+.card-corner .suit-mini {
+  font-size: 0.7rem;
+  margin-top: 1px;
+}
+
+.card-center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.card-red {
+  color: #d81b3a;
+}
+.card-black {
+  color: #14151a;
+}
+
+.card-back {
+  width: var(--card-w);
+  height: var(--card-h);
+  border-radius: 10px;
+  background:
+    repeating-linear-gradient(135deg, rgba(25, 209, 132, 0.16) 0px, rgba(25, 209, 132, 0.16) 2px, transparent 2px, transparent 10px),
+    linear-gradient(160deg, #0c1118, #05070a);
+  border: 1px solid rgba(25, 209, 132, 0.35);
+  box-shadow: 0 6px 16px -6px rgba(0, 0, 0, 0.6);
+  position: relative;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.card-back::after {
+  content: "";
+  width: 60%;
+  height: 60%;
+  border: 1.5px solid rgba(25, 209, 132, 0.55);
+  border-radius: 8px;
+  background: radial-gradient(circle, rgba(25, 209, 132, 0.14), transparent 70%);
+}
+
+.card-fan {
+  display: flex;
+}
+.card-fan .playing-card,
+.card-fan .card-back {
+  margin-left: -34px;
+}
+.card-fan .playing-card:first-child,
+.card-fan .card-back:first-child {
+  margin-left: 0;
+}
+
+.whot-suit-icon {
+  width: 34px;
+  height: 34px;
+}
+.playing-card.lg .whot-suit-icon {
+  width: 48px;
+  height: 48px;
+}
+.playing-card.sm .whot-suit-icon {
+  width: 22px;
+  height: 22px;
+}
+
+.whot-badge {
+  position: absolute;
+  bottom: 6px;
+  right: 7px;
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  color: var(--gray-500);
+}
