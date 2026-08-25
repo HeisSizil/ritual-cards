@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { SoundToggleButton } from "@/components/SoundToggleButton";
+import { VoiceChatButton } from "@/components/VoiceChatButton";
 import { TurnTimer } from "@/components/TurnTimer";
 import { PlayingCardView } from "@/components/cards/PlayingCardView";
 import { CardBackView } from "@/components/cards/WhotCardView";
 import { WhotIntro } from "@/components/whot/WhotIntro";
 import type { SfxType } from "@/context/SoundContext";
+import { useVoiceChat, type VoiceChatHook } from "@/lib/voiceChat";
 import { getPokerBalance, recordMatch, setPokerBalance } from "@/lib/storage";
 import { applyAction, callAmount, canCheck } from "@/games/poker/multiplayerEngine";
 import { dealNextPokerHand, eligiblePlayerCount, type PokerRoomState } from "@/games/poker/multiplayerRoom";
@@ -45,6 +47,8 @@ export function PokerRoomView({
   useEffect(() => {
     roomRef.current = room;
   }, [room]);
+
+  const voiceChat = useVoiceChat(roomCode, playerId);
 
   const isHost = room.hostPlayerId === playerId;
   const game = room.game;
@@ -187,7 +191,7 @@ export function PokerRoomView({
   if (status === "waiting" || !game) {
     return (
       <div className="container section" style={{ paddingBottom: "3rem" }}>
-        <RoomHeader roomCode={roomCode} onLeave={onLeave} />
+        <RoomHeader roomCode={roomCode} onLeave={onLeave} voiceChat={voiceChat} />
         <div className="panel" style={{ padding: "2.5rem", textAlign: "center", marginBottom: "1.5rem" }}>
           <div className="chip chip-gold" style={{ marginBottom: "1rem" }}>
             <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--gold)" }} className="pulse-dot" />
@@ -255,6 +259,7 @@ export function PokerRoomView({
           </span>
         </div>
         <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+          <VoiceChatButton voice={voiceChat} />
           <SoundToggleButton />
           <button type="button" className="btn btn-ghost btn-sm" onClick={onLeave}>
             Leave room
@@ -298,6 +303,7 @@ export function PokerRoomView({
                       sittingOut={sittingOut}
                       active={game.toAct === s.id && game.status === "betting"}
                       accent="pink"
+                      speaking={voiceChat.speaking[s.playerId]}
                     />
                     {!sittingOut && (
                       <div className={`mp-hole-cards ${seat.folded ? "folded" : ""}`} style={{ marginTop: "0.4rem" }}>
@@ -471,13 +477,14 @@ export function PokerRoomView({
   );
 }
 
-function RoomHeader({ roomCode, onLeave }: { roomCode: string; onLeave: () => void }) {
+function RoomHeader({ roomCode, onLeave, voiceChat }: { roomCode: string; onLeave: () => void; voiceChat?: VoiceChatHook }) {
   return (
     <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: "0.75rem", marginBottom: "1.5rem" }}>
       <span className="chip">
         Room <span className="mono">{roomCode}</span>
       </span>
       <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+        {voiceChat && <VoiceChatButton voice={voiceChat} />}
         <SoundToggleButton />
         <button type="button" className="btn btn-ghost btn-sm" onClick={onLeave}>
           Leave room
@@ -497,6 +504,7 @@ function SeatLabel({
   sittingOut,
   active,
   accent,
+  speaking,
 }: {
   label: string;
   stack: number;
@@ -507,11 +515,15 @@ function SeatLabel({
   sittingOut: boolean;
   active: boolean;
   accent: "green" | "pink";
+  speaking?: boolean;
 }) {
   return (
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "0.5rem" }}>
       <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
         <span style={{ fontWeight: 600, color: "var(--gray-200)" }}>{label}</span>
+        {speaking && (
+          <span title="Speaking" className="pulse-dot" style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--green)", display: "inline-block", flexShrink: 0 }} />
+        )}
         {isDealer && <span className="chip chip-gold">D</span>}
         {sittingOut && <span className="chip">Sitting out</span>}
         {folded && <span className="chip">Folded</span>}

@@ -3,12 +3,14 @@ import type { RealtimeChannel } from "@supabase/supabase-js";
 import { UsernameGate } from "@/components/UsernameGate";
 import { ResultOverlay } from "@/components/ResultOverlay";
 import { SoundToggleButton } from "@/components/SoundToggleButton";
+import { VoiceChatButton, SpeakingDot } from "@/components/VoiceChatButton";
 import { TurnTimer } from "@/components/TurnTimer";
 import { WhotCardView, CardBackView } from "@/components/cards/WhotCardView";
 import { WhotIntro } from "@/components/whot/WhotIntro";
 import { PokerRoomView } from "@/components/poker/PokerRoomView";
 import { useUsername } from "@/context/UsernameContext";
 import { useSound } from "@/context/SoundContext";
+import { useVoiceChat } from "@/lib/voiceChat";
 import { supabase, generateRoomCode, getPersistentPlayerId } from "@/lib/supabase";
 import { recordMatch, getPokerBalance } from "@/lib/storage";
 import { STRATEGIES, strategyMeta, type StrategyProfile } from "@/lib/aiStrategy";
@@ -483,6 +485,8 @@ function RoomView({
   const prevGameRef = useRef<WhotGameState | null>(room.game);
   const processedFinishRef = useRef<WhotGameState | null>(null);
 
+  const voiceChat = useVoiceChat(roomCode, playerId);
+
   useEffect(() => {
     roomRef.current = room;
   }, [room]);
@@ -717,6 +721,7 @@ function RoomView({
             Room <span className="mono">{roomCode}</span>
           </span>
           <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+            <VoiceChatButton voice={voiceChat} />
             <SoundToggleButton />
             <button type="button" className="btn btn-ghost btn-sm" onClick={onLeave}>
               Leave room
@@ -766,6 +771,7 @@ function RoomView({
             Room <span className="mono">{roomCode}</span>
           </span>
           <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+            <VoiceChatButton voice={voiceChat} />
             <SoundToggleButton />
             <button type="button" className="btn btn-ghost btn-sm" onClick={onLeave}>
               Leave room
@@ -806,6 +812,7 @@ function RoomView({
             Room <span className="mono">{roomCode}</span>
           </span>
           <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+            <VoiceChatButton voice={voiceChat} />
             <SoundToggleButton />
             <button type="button" className="btn btn-ghost btn-sm" onClick={onLeave}>
               Leave room
@@ -859,6 +866,7 @@ function RoomView({
             Room <span className="mono">{roomCode}</span>
           </span>
           <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+            <VoiceChatButton voice={voiceChat} />
             <SoundToggleButton />
             <button type="button" className="btn btn-ghost btn-sm" onClick={onLeave}>
               Leave room
@@ -947,6 +955,7 @@ function RoomView({
           )}
         </div>
         <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+          <VoiceChatButton voice={voiceChat} />
           <SoundToggleButton />
           <button type="button" className="btn btn-ghost btn-sm" onClick={onLeave}>
             Leave room
@@ -1001,6 +1010,7 @@ function RoomView({
                   count={game.hands[seat.id]?.length ?? 0}
                   active={game.turn === seat.id}
                   accent="pink"
+                  speaking={voiceChat.speaking[seat.playerId]}
                 />
               </div>
             ))}
@@ -1137,11 +1147,14 @@ function RoomView({
   );
 }
 
-function SeatLabel({ label, count, active, accent }: { label: string; count: number; active: boolean; accent: "green" | "pink" }) {
+function SeatLabel({ label, count, active, accent, speaking }: { label: string; count: number; active: boolean; accent: "green" | "pink"; speaking?: boolean }) {
   return (
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
       <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
         <span style={{ fontWeight: 600, color: "var(--gray-200)" }}>{label}</span>
+        {speaking && (
+          <span title="Speaking" className="pulse-dot" style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--green)", display: "inline-block", flexShrink: 0 }} />
+        )}
         <span className="hex">{count} cards</span>
       </div>
       {active && (
