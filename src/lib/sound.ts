@@ -168,6 +168,14 @@ export function playPokerWinSound(volume = 1) {
   notes.forEach((freq, i) => tone(ctx, freq, t + 0.15 + i * 0.11, 0.28, "triangle", 0.18 * volume));
 }
 
+export function playTickSound(volume = 1) {
+  const ctx = getAudioCtx();
+  if (!ctx || volume <= 0) return;
+  const t = ctx.currentTime;
+  tone(ctx, 1400, t, 0.03, "square", 0.07 * volume);
+  tone(ctx, 2800, t + 0.01, 0.02, "square", 0.04 * volume);
+}
+
 export function playAllInSound(volume = 1) {
   const ctx = getAudioCtx();
   if (!ctx || volume <= 0) return;

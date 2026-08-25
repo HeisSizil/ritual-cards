@@ -18,6 +18,7 @@ export interface PokerRoomState {
   stacks: Record<SeatId, number>;
   buttonSeatIndex: number;
   handNumber: number;
+  turnStartedAt?: number | null;
 }
 
 export function eligiblePlayerCount(room: PokerRoomState): number {
@@ -57,5 +58,5 @@ export function dealNextPokerHand(room: PokerRoomState): PokerRoomState {
 
   const handNumber = room.handNumber + 1;
   const game = startNewMultiplayerHand(activePlayers, stacks, handNumber);
-  return { ...room, stacks, game, buttonSeatIndex: buttonIdx, handNumber };
+  return { ...room, stacks, game, buttonSeatIndex: buttonIdx, handNumber, turnStartedAt: Date.now() };
 }

@@ -22,6 +22,7 @@ import {
   playFoldSound,
   playLoseSound,
   playPokerWinSound,
+  playTickSound,
   playWhooshSound,
   playWinSound,
   speakText,
@@ -39,7 +40,8 @@ export type SfxType =
   | "pokerCheck"
   | "pokerFold"
   | "pokerWin"
-  | "pokerAllIn";
+  | "pokerAllIn"
+  | "tick";
 
 interface SoundContextValue {
   muted: boolean;
@@ -73,6 +75,7 @@ const SFX_PLAYERS: Record<SfxType, (volume: number) => void> = {
   pokerFold: playFoldSound,
   pokerWin: playPokerWinSound,
   pokerAllIn: playAllInSound,
+  tick: playTickSound,
 };
 
 export function SoundProvider({ children }: { children: ReactNode }) {

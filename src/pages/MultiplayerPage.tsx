@@ -3,6 +3,7 @@ import type { RealtimeChannel } from "@supabase/supabase-js";
 import { UsernameGate } from "@/components/UsernameGate";
 import { ResultOverlay } from "@/components/ResultOverlay";
 import { SoundToggleButton } from "@/components/SoundToggleButton";
+import { TurnTimer } from "@/components/TurnTimer";
 import { WhotCardView, CardBackView } from "@/components/cards/WhotCardView";
 import { WhotIntro } from "@/components/whot/WhotIntro";
 import { PokerRoomView } from "@/components/poker/PokerRoomView";
@@ -36,6 +37,7 @@ interface WhotRoomState {
   aiAssist: Record<SeatId, boolean>;
   aiProfile: Record<SeatId, StrategyProfile>;
   tournament: TournamentState | null; // set when the table started with 3+ players (Highest Hand Knockout)
+  turnStartedAt?: number | null;
 }
 
 type RoomState = WhotRoomState;
@@ -46,6 +48,9 @@ const AI_ASSIST_MOVE_DELAY = 2500;
 const MIN_PLAYERS = 2;
 const MAX_PLAYERS = 10;
 const KNOCKOUT_MIN_PLAYERS = 3;
+const WHOT_TURN_SECS = 30;
+const WHOT_WARN_SECS = 10;
+const WHOT_HOST_GRACE_SECS = 5;
 
 export function MultiplayerPage() {
   return (
@@ -139,6 +144,7 @@ function MultiplayerContainer() {
               aiAssist: {},
               aiProfile: {},
               tournament: null,
+              turnStartedAt: null,
             };
       const { data, error: err } = await supabase
         .from("games")
@@ -252,6 +258,7 @@ function MultiplayerContainer() {
         aiAssist: Object.fromEntries(seatIds.map((id) => [id, false])),
         aiProfile: Object.fromEntries(seatIds.map((id) => [id, "balanced" as StrategyProfile])),
         tournament: seatIds.length >= KNOCKOUT_MIN_PLAYERS ? createTournament(seatIds) : null,
+        turnStartedAt: Date.now(),
       };
     }
     setRoom(next);
@@ -466,7 +473,7 @@ function RoomView({
   onLeave: () => void;
   recordedRef: React.MutableRefObject<boolean>;
   speak: (text: string) => void;
-  playSfx: (type: "click" | "whoosh" | "win" | "lose") => void;
+  playSfx: (type: "click" | "whoosh" | "win" | "lose" | "tick") => void;
 }) {
   const roomRef = useRef(room);
   const timeoutRef = useRef<number | null>(null);
@@ -587,7 +594,7 @@ function RoomView({
   function startNextRound() {
     if (!tournament) return;
     const newGame = createWhotGame(tournament.remainingSeats);
-    onWriteRoom({ ...room, game: newGame, tournament: { ...tournament, round: tournament.round + 1, lastRoundResult: null } });
+    onWriteRoom({ ...room, game: newGame, tournament: { ...tournament, round: tournament.round + 1, lastRoundResult: null }, turnStartedAt: Date.now() });
   }
 
   // Drive my own seat's auto-play when I've enabled "let AI play for me".
@@ -602,18 +609,18 @@ function RoomView({
       const profile = current.aiProfile[mySeatId] ?? "balanced";
 
       if (current.game.pendingPickThree > 0 && getPlayableCards(current.game, mySeatId).length === 0) {
-        onWriteRoom({ ...current, game: resolvePickThree(current.game, mySeatId) });
+        onWriteRoom({ ...current, game: resolvePickThree(current.game, mySeatId), turnStartedAt: Date.now() });
         return;
       }
 
       const move = chooseWhotMove(current.game, mySeatId, profile);
       if (move.action === "play") {
         const { state: nextGame } = playCard(current.game, mySeatId, move.cardId, move.suit);
-        onWriteRoom({ ...current, game: nextGame });
+        onWriteRoom({ ...current, game: nextGame, turnStartedAt: Date.now() });
         return;
       }
       const drawn = voluntaryDraw(current.game, mySeatId);
-      onWriteRoom({ ...current, game: drawn });
+      onWriteRoom({ ...current, game: drawn, turnStartedAt: Date.now() });
       window.setTimeout(() => {
         const c2 = roomRef.current;
         if (!c2.game || c2.game.turn !== mySeatId || c2.game.status !== "playing") return;
@@ -621,9 +628,9 @@ function RoomView({
         if (card) {
           const suit = card.suit === "Whot" ? pickSuitToCall(c2.game.hands[mySeatId], profile) : undefined;
           const { state: nextGame } = playCard(c2.game, mySeatId, card.id, suit);
-          onWriteRoom({ ...c2, game: nextGame });
+          onWriteRoom({ ...c2, game: nextGame, turnStartedAt: Date.now() });
         } else {
-          onWriteRoom({ ...c2, game: endTurn(c2.game) });
+          onWriteRoom({ ...c2, game: endTurn(c2.game), turnStartedAt: Date.now() });
         }
       }, AI_ASSIST_MOVE_DELAY);
     }, AI_ASSIST_MOVE_DELAY);
@@ -633,6 +640,30 @@ function RoomView({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [room, status, mySeatId, game]);
+
+  // Host backup: auto-draw for any player whose timer has lapsed, with a grace period on top of the
+  // normal turn duration to give the active player's client priority.
+  useEffect(() => {
+    if (!isHost || !game || game.status !== "playing") return;
+    if (game.turn === mySeatId) return; // Active player handles their own timeout
+    const startedAt = room.turnStartedAt ?? null;
+    if (!startedAt) return;
+
+    const turnAtSchedule = game.turn;
+    const elapsedMs = Date.now() - startedAt;
+    const delayMs = Math.max(100, (WHOT_TURN_SECS + WHOT_HOST_GRACE_SECS) * 1000 - elapsedMs);
+
+    const id = window.setTimeout(() => {
+      const current = roomRef.current;
+      if (!current.game || current.game.turn !== turnAtSchedule || current.game.status !== "playing") return;
+      const g = current.game;
+      const nextGame = g.pendingPickThree > 0 ? resolvePickThree(g, turnAtSchedule) : endTurn(voluntaryDraw(g, turnAtSchedule));
+      onWriteRoom({ ...current, game: nextGame, turnStartedAt: Date.now() });
+    }, delayMs);
+
+    return () => window.clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [game?.turn, room.turnStartedAt, isHost]);
 
   // Records once the match is truly decided -- for a knockout table that's the tournament champion,
   // not any individual round's "safe" winner (a round ending isn't a win/loss by itself).
@@ -755,6 +786,7 @@ function RoomView({
               ...room,
               game: createWhotGame(seatIds),
               tournament: seatIds.length >= KNOCKOUT_MIN_PLAYERS ? createTournament(seatIds) : null,
+              turnStartedAt: Date.now(),
             });
             setShowIntro(true);
           }}
@@ -856,17 +888,25 @@ function RoomView({
     if (!game) return;
     playSfx("click");
     const { state: nextGame } = playCard(game, mySeatId, cardId, suit);
-    onWriteRoom({ ...room, game: nextGame });
+    onWriteRoom({ ...room, game: nextGame, turnStartedAt: Date.now() });
   }
 
   function handleDraw() {
     if (!game) return;
     playSfx("whoosh");
     if (game.pendingPickThree > 0) {
-      onWriteRoom({ ...room, game: resolvePickThree(game, mySeatId) });
+      onWriteRoom({ ...room, game: resolvePickThree(game, mySeatId), turnStartedAt: Date.now() });
     } else {
-      onWriteRoom({ ...room, game: endTurn(voluntaryDraw(game, mySeatId)) });
+      onWriteRoom({ ...room, game: endTurn(voluntaryDraw(game, mySeatId)), turnStartedAt: Date.now() });
     }
+  }
+
+  function handleWhotTimerTimeout() {
+    const current = roomRef.current;
+    if (!current.game || current.game.status !== "playing" || current.game.turn !== mySeatId) return;
+    const g = current.game;
+    const nextGame = g.pendingPickThree > 0 ? resolvePickThree(g, mySeatId) : endTurn(voluntaryDraw(g, mySeatId));
+    onWriteRoom({ ...current, game: nextGame, turnStartedAt: Date.now() });
   }
 
   function handleClick(cardId: string, isWhot: boolean) {
@@ -937,6 +977,19 @@ function RoomView({
           </div>
         )}
       </div>
+
+      {game.status === "playing" && (
+        <TurnTimer
+          turnStartedAt={room.turnStartedAt}
+          durationSec={WHOT_TURN_SECS}
+          paused={!!pendingWhotCardId}
+          warnAtSec={WHOT_WARN_SECS}
+          turnLabel={game.turn === mySeatId ? "Your Turn" : `${seatName(game.turn)}'s Turn`}
+          isMyTurn={game.turn === mySeatId}
+          onTimeout={isManualMyTurn ? handleWhotTimerTimeout : undefined}
+          onTickSound={() => playSfx("tick")}
+        />
+      )}
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 280px", gap: "1.5rem" }} className="whot-layout">
         <div>
@@ -1076,7 +1129,7 @@ function RoomView({
           title={won ? "You Win!" : `${winnerName ?? "Opponent"} Wins`}
           subtitle={won ? "You emptied your hand first." : `${winnerName ?? "Your opponent"} emptied their hand first.`}
           payoutText={won ? `${(WAGER * 2).toFixed(2)} RITUAL to your wallet` : "Better luck next hand"}
-          onPlayAgain={() => onWriteRoom({ ...room, game: createWhotGame(room.seats.map((s) => s.id)) })}
+          onPlayAgain={() => onWriteRoom({ ...room, game: createWhotGame(room.seats.map((s) => s.id)), turnStartedAt: Date.now() })}
           onExit={onLeave}
         />
       )}

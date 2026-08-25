@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { SoundToggleButton } from "@/components/SoundToggleButton";
+import { TurnTimer } from "@/components/TurnTimer";
 import { PlayingCardView } from "@/components/cards/PlayingCardView";
 import { CardBackView } from "@/components/cards/WhotCardView";
 import { WhotIntro } from "@/components/whot/WhotIntro";
@@ -9,6 +10,10 @@ import { applyAction, callAmount, canCheck } from "@/games/poker/multiplayerEngi
 import { dealNextPokerHand, eligiblePlayerCount, type PokerRoomState } from "@/games/poker/multiplayerRoom";
 import type { MPPokerAction, MPPokerGameState, SeatId } from "@/games/poker/multiplayerTypes";
 import "./multiplayer-poker.css";
+
+const POKER_TURN_SECS = 45;
+const POKER_WARN_SECS = 15;
+const POKER_HOST_GRACE_SECS = 5;
 
 const MIN_PLAYERS = 2;
 const MAX_PLAYERS = 10;
@@ -129,6 +134,28 @@ export function PokerRoomView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [game?.status, game?.handNumber]);
 
+  // Host backup: auto-fold for any player whose timer has lapsed, with a grace period.
+  useEffect(() => {
+    if (!isHost || !game || game.status !== "betting") return;
+    if (game.toAct === mySeatId) return; // Active player handles their own timeout
+    const startedAt = room.turnStartedAt ?? null;
+    if (!startedAt) return;
+
+    const toActAtSchedule = game.toAct;
+    if (!toActAtSchedule) return;
+    const elapsedMs = Date.now() - startedAt;
+    const delayMs = Math.max(100, (POKER_TURN_SECS + POKER_HOST_GRACE_SECS) * 1000 - elapsedMs);
+
+    const id = window.setTimeout(() => {
+      const current = roomRef.current;
+      if (!current.game || current.game.toAct !== toActAtSchedule || current.game.status !== "betting") return;
+      onWriteRoom({ ...current, game: applyAction(current.game, toActAtSchedule, { type: "fold" }), turnStartedAt: Date.now() });
+    }, delayMs);
+
+    return () => window.clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [game?.toAct, room.turnStartedAt, isHost]);
+
   const [raiseTo, setRaiseTo] = useState(0);
   useEffect(() => {
     if (!game) return;
@@ -202,7 +229,13 @@ export function PokerRoomView({
 
   function act(action: MPPokerAction) {
     if (!game) return;
-    onWriteRoom({ ...room, game: applyAction(game, mySeatId, action) });
+    onWriteRoom({ ...room, game: applyAction(game, mySeatId, action), turnStartedAt: Date.now() });
+  }
+
+  function handlePokerTimerTimeout() {
+    const current = roomRef.current;
+    if (!current.game || current.game.status !== "betting" || current.game.toAct !== mySeatId) return;
+    onWriteRoom({ ...current, game: applyAction(current.game, mySeatId, { type: "fold" }), turnStartedAt: Date.now() });
   }
 
   function dealNext() {
@@ -228,6 +261,18 @@ export function PokerRoomView({
           </button>
         </div>
       </div>
+
+      {game.status === "betting" && (
+        <TurnTimer
+          turnStartedAt={room.turnStartedAt}
+          durationSec={POKER_TURN_SECS}
+          warnAtSec={POKER_WARN_SECS}
+          turnLabel={game.toAct === mySeatId ? "Your Turn" : `${seatName(game.toAct ?? "")} is acting…`}
+          isMyTurn={game.toAct === mySeatId}
+          onTimeout={isMyTurn ? handlePokerTimerTimeout : undefined}
+          onTickSound={() => playSfx("tick")}
+        />
+      )}
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 280px", gap: "1.5rem" }} className="poker-layout">
         <div>
