@@ -99,7 +99,11 @@ function MultiplayerContainer() {
 
     const refetch = async () => {
       const { data, error: err } = await supabase.from("games").select("*").eq("room_code", code).single();
-      if (err || !data) return;
+      if (err || !data) {
+        console.log("[room] refetch: no data or error for room_code:", code, err);
+        return;
+      }
+      console.log("[room] refetch: room_code:", code, "status:", data.status);
       setStatus(data.status as "waiting" | "active" | "finished" | "closed");
       setRoom(data.game_state as AnyRoomState);
     };
@@ -109,7 +113,9 @@ function MultiplayerContainer() {
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "games", filter: `room_code=eq.${code}` },
-        () => {
+        (payload) => {
+          const newRow = payload.new as Record<string, unknown>;
+          console.log("[room] realtime event:", payload.eventType, "new status:", newRow?.status, "room_code:", code);
           refetch();
         },
       )
@@ -125,10 +131,13 @@ function MultiplayerContainer() {
 
   useEffect(() => {
     if (status !== "closed") return;
+    console.log("[room] status=closed detected. playerId:", playerId, "hostPlayerId:", hostPlayerIdRef.current);
     if (hostPlayerIdRef.current === playerId) {
+      console.log("[room] I am the host — ignoring closed status (already leaving)");
       setStatus("waiting");
       return;
     }
+    console.log("[room] I am not the host — redirecting to lobby");
     if (channelRef.current) {
       supabase.removeChannel(channelRef.current);
       channelRef.current = null;
@@ -140,6 +149,22 @@ function MultiplayerContainer() {
     setStatus("waiting");
     recordedRef.current = false;
   }, [status]);
+
+  // Backup poll every 5 s for non-host players in case the realtime event is missed.
+  useEffect(() => {
+    if (screen !== "room" || !roomCode) return;
+    const pollId = setInterval(async () => {
+      const isHostPlayer = hostPlayerIdRef.current === playerId;
+      if (isHostPlayer) return;
+      const { data } = await supabase.from("games").select("status").eq("room_code", roomCode).single();
+      console.log("[poll] room_code:", roomCode, "status:", data?.status);
+      if (data?.status === "closed") {
+        console.log("[poll] Detected status: closed — triggering redirect");
+        setStatus("closed");
+      }
+    }, 5000);
+    return () => clearInterval(pollId);
+  }, [screen, roomCode, playerId]);
 
   async function createRoom() {
     setBusy(true);
@@ -298,11 +323,19 @@ function MultiplayerContainer() {
   }
 
   async function leaveRoom() {
-    if (room && room.hostPlayerId === playerId && roomId) {
+    const isHostLeaving = !!(room && room.hostPlayerId === playerId && roomId);
+    console.log("[leaveRoom] playerId:", playerId, "isHost:", isHostLeaving, "roomId:", roomId);
+    if (isHostLeaving) {
+      console.log("[leaveRoom] Host leaving — writing status: closed to Supabase for roomId:", roomId);
       try {
-        await supabase.from("games").update({ status: "closed" }).eq("id", roomId);
-      } catch {
-        /* best-effort */
+        const { error: updateErr } = await supabase.from("games").update({ status: "closed" }).eq("id", roomId!);
+        if (updateErr) {
+          console.error("[leaveRoom] Failed to write status: closed:", updateErr);
+        } else {
+          console.log("[leaveRoom] Successfully wrote status: closed to Supabase");
+        }
+      } catch (e) {
+        console.error("[leaveRoom] Exception writing status: closed:", e);
       }
     }
     if (channelRef.current) {
