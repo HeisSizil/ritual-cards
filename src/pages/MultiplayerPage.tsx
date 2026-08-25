@@ -5,18 +5,22 @@ import { ResultOverlay } from "@/components/ResultOverlay";
 import { SoundToggleButton } from "@/components/SoundToggleButton";
 import { WhotCardView, CardBackView } from "@/components/cards/WhotCardView";
 import { WhotIntro } from "@/components/whot/WhotIntro";
+import { PokerRoomView } from "@/components/poker/PokerRoomView";
 import { useUsername } from "@/context/UsernameContext";
 import { useSound } from "@/context/SoundContext";
 import { supabase, generateRoomCode, getPersistentPlayerId } from "@/lib/supabase";
-import { recordMatch } from "@/lib/storage";
+import { recordMatch, getPokerBalance } from "@/lib/storage";
 import { STRATEGIES, strategyMeta, type StrategyProfile } from "@/lib/aiStrategy";
 import { createWhotGame, endTurn, getPlayableCards, playCard, resolvePickThree, topCard, voluntaryDraw } from "@/games/whot/engine";
 import { chooseWhotMove, pickSuitToCall, shouldPlayDrawnCard } from "@/games/whot/ai";
 import { REAL_SUITS } from "@/games/whot/types";
 import type { WhotGameState, WhotPlayer, WhotSuit } from "@/games/whot/types";
 import { applyRoundResult, computeRoundResult, createTournament, handScore, type RoundResult, type TournamentState } from "@/games/whot/tournament";
+import { dealNextPokerHand, type PokerRoomState } from "@/games/poker/multiplayerRoom";
+import type { MPPokerGameState } from "@/games/poker/multiplayerTypes";
 
 type SeatId = WhotPlayer;
+type GameType = "whot" | "poker";
 
 interface SeatInfo {
   id: SeatId;
@@ -24,7 +28,8 @@ interface SeatInfo {
   name: string;
 }
 
-interface RoomState {
+interface WhotRoomState {
+  kind: "whot";
   seats: SeatInfo[];
   hostPlayerId: string;
   game: WhotGameState | null; // null while the room is still in the lobby
@@ -32,6 +37,9 @@ interface RoomState {
   aiProfile: Record<SeatId, StrategyProfile>;
   tournament: TournamentState | null; // set when the table started with 3+ players (Highest Hand Knockout)
 }
+
+type RoomState = WhotRoomState;
+type AnyRoomState = WhotRoomState | PokerRoomState;
 
 const WAGER = 0.5;
 const AI_ASSIST_MOVE_DELAY = 2500;
@@ -61,6 +69,7 @@ function MultiplayerContainer() {
   }, []);
 
   const [screen, setScreen] = useState<"choose" | "room">("choose");
+  const [gameType, setGameType] = useState<GameType>("whot");
   const [joinCode, setJoinCode] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -69,7 +78,7 @@ function MultiplayerContainer() {
   const [roomCode, setRoomCode] = useState("");
   const [mySeatId, setMySeatId] = useState<SeatId>("seat-0");
   const [status, setStatus] = useState<"waiting" | "active" | "finished">("waiting");
-  const [room, setRoom] = useState<RoomState | null>(null);
+  const [room, setRoom] = useState<AnyRoomState | null>(null);
   const channelRef = useRef<RealtimeChannel | null>(null);
   const recordedRef = useRef(false);
 
@@ -83,7 +92,7 @@ function MultiplayerContainer() {
       const { data, error: err } = await supabase.from("games").select("*").eq("room_code", code).single();
       if (err || !data) return;
       setStatus(data.status);
-      setRoom(data.game_state as RoomState);
+      setRoom(data.game_state as AnyRoomState);
     };
 
     const channel = supabase
@@ -111,19 +120,31 @@ function MultiplayerContainer() {
     try {
       const code = generateRoomCode();
       const hostSeat: SeatInfo = { id: "seat-0", playerId, name: username ?? "Player 1" };
-      const initialRoom: RoomState = {
-        seats: [hostSeat],
-        hostPlayerId: playerId,
-        game: null,
-        aiAssist: {},
-        aiProfile: {},
-        tournament: null,
-      };
+      const initialRoom: AnyRoomState =
+        gameType === "poker"
+          ? {
+              kind: "poker",
+              seats: [hostSeat],
+              hostPlayerId: playerId,
+              game: null,
+              stacks: { "seat-0": getPokerBalance() || 10 },
+              buttonSeatIndex: 0,
+              handNumber: 0,
+            }
+          : {
+              kind: "whot",
+              seats: [hostSeat],
+              hostPlayerId: playerId,
+              game: null,
+              aiAssist: {},
+              aiProfile: {},
+              tournament: null,
+            };
       const { data, error: err } = await supabase
         .from("games")
         .insert({
           room_code: code,
-          game_type: "whot",
+          game_type: gameType,
           player1_id: playerId,
           game_state: initialRoom,
           status: "waiting",
@@ -159,9 +180,9 @@ function MultiplayerContainer() {
         .single();
       if (findErr || !found) throw new Error("Room not found or already started.");
 
-      const current = found.game_state as RoomState;
+      const current = found.game_state as AnyRoomState;
       const existing = current.seats.find((s) => s.playerId === playerId);
-      let updatedRoom: RoomState;
+      let updatedRoom: AnyRoomState;
       let seatId: SeatId;
       if (existing) {
         seatId = existing.id;
@@ -169,10 +190,11 @@ function MultiplayerContainer() {
       } else {
         if (current.seats.length >= MAX_PLAYERS) throw new Error("Room is full.");
         seatId = `seat-${current.seats.length}`;
-        updatedRoom = {
-          ...current,
-          seats: [...current.seats, { id: seatId, playerId, name: username ?? `Player ${current.seats.length + 1}` }],
-        };
+        const newSeat: SeatInfo = { id: seatId, playerId, name: username ?? `Player ${current.seats.length + 1}` };
+        updatedRoom =
+          current.kind === "poker"
+            ? { ...current, seats: [...current.seats, newSeat], stacks: { ...current.stacks, [seatId]: getPokerBalance() || 10 } }
+            : { ...current, seats: [...current.seats, newSeat] };
       }
 
       const { data, error: updErr } = await supabase
@@ -187,7 +209,7 @@ function MultiplayerContainer() {
       setRoomCode(code);
       setMySeatId(seatId);
       setStatus(data.status);
-      setRoom(data.game_state as RoomState);
+      setRoom(data.game_state as AnyRoomState);
       subscribe(code);
       setScreen("room");
     } catch (e) {
@@ -197,16 +219,18 @@ function MultiplayerContainer() {
     }
   }
 
-  async function writeRoom(next: RoomState) {
+  async function writeRoom(next: AnyRoomState) {
     setRoom(next);
     if (!roomId) return;
     try {
       await supabase.from("games").update({ game_state: next }).eq("id", roomId);
-      if (next.game) {
+      const game = next.game;
+      if (game) {
+        const turnOrToAct = next.kind === "whot" ? (game as WhotGameState).turn : (game as MPPokerGameState).toAct;
         await supabase.from("moves").insert({
           game_id: roomId,
           player_id: playerId,
-          move_data: { turn: next.game.turn, status: next.game.status },
+          move_data: { turn: turnOrToAct, status: game.status },
         });
       }
     } catch {
@@ -217,14 +241,19 @@ function MultiplayerContainer() {
   async function startGame() {
     if (!room || room.seats.length < MIN_PLAYERS) return;
     const seatIds = room.seats.map((s) => s.id);
-    const game = createWhotGame(seatIds);
-    const next: RoomState = {
-      ...room,
-      game,
-      aiAssist: Object.fromEntries(seatIds.map((id) => [id, false])),
-      aiProfile: Object.fromEntries(seatIds.map((id) => [id, "balanced" as StrategyProfile])),
-      tournament: seatIds.length >= KNOCKOUT_MIN_PLAYERS ? createTournament(seatIds) : null,
-    };
+    let next: AnyRoomState;
+    if (room.kind === "poker") {
+      next = dealNextPokerHand(room);
+    } else {
+      const game = createWhotGame(seatIds);
+      next = {
+        ...room,
+        game,
+        aiAssist: Object.fromEntries(seatIds.map((id) => [id, false])),
+        aiProfile: Object.fromEntries(seatIds.map((id) => [id, "balanced" as StrategyProfile])),
+        tournament: seatIds.length >= KNOCKOUT_MIN_PLAYERS ? createTournament(seatIds) : null,
+      };
+    }
     setRoom(next);
     setStatus("active");
     if (!roomId) return;
@@ -251,7 +280,7 @@ function MultiplayerContainer() {
     return (
       <div className="container section" style={{ maxWidth: 640 }}>
         <div className="chip chip-pink" style={{ marginBottom: "1rem" }}>
-          Multiplayer · Whot
+          Multiplayer · Whot &amp; Poker
         </div>
         <h1 style={{ fontSize: "clamp(1.9rem, 4vw, 2.4rem)", marginBottom: "0.75rem" }}>Play with friends, live</h1>
         <p style={{ color: "var(--gray-400)", marginBottom: "2rem" }}>
@@ -265,8 +294,37 @@ function MultiplayerContainer() {
             <p style={{ color: "var(--gray-400)", fontSize: "0.88rem", marginBottom: "1.25rem" }}>
               Get a room code to share with up to {MAX_PLAYERS - 1} friends.
             </p>
+            <div className="data-label" style={{ marginBottom: "0.5rem" }}>
+              Choose a game
+            </div>
+            <div style={{ display: "flex", gap: "0.5rem", marginBottom: "1.25rem" }}>
+              <button
+                type="button"
+                className="btn btn-sm"
+                style={{
+                  flex: 1,
+                  borderColor: gameType === "whot" ? "var(--pink)" : "var(--gray-700)",
+                  color: gameType === "whot" ? "var(--pink)" : "var(--gray-400)",
+                }}
+                onClick={() => setGameType("whot")}
+              >
+                Whot
+              </button>
+              <button
+                type="button"
+                className="btn btn-sm"
+                style={{
+                  flex: 1,
+                  borderColor: gameType === "poker" ? "var(--green)" : "var(--gray-700)",
+                  color: gameType === "poker" ? "var(--green)" : "var(--gray-400)",
+                }}
+                onClick={() => setGameType("poker")}
+              >
+                Poker
+              </button>
+            </div>
             <button type="button" className="btn btn-primary btn-block" onClick={createRoom} disabled={busy}>
-              {busy ? "Creating…" : "Create Room"}
+              {busy ? "Creating…" : `Create ${gameType === "poker" ? "Poker" : "Whot"} Room`}
             </button>
           </div>
           <div className="panel" style={{ padding: "1.75rem" }}>
@@ -299,6 +357,23 @@ function MultiplayerContainer() {
       <div className="container section" style={{ textAlign: "center" }}>
         <p style={{ color: "var(--gray-400)" }}>Loading room…</p>
       </div>
+    );
+  }
+
+  if (room.kind === "poker") {
+    return (
+      <PokerRoomView
+        room={room}
+        status={status}
+        mySeatId={mySeatId}
+        playerId={playerId}
+        roomCode={roomCode}
+        username={username ?? "You"}
+        onWriteRoom={writeRoom}
+        onStartGame={startGame}
+        onLeave={leaveRoom}
+        playSfx={playSfx}
+      />
     );
   }
 

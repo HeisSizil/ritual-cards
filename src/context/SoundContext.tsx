@@ -12,10 +12,34 @@ import {
   setVoiceVolume as persistVoiceVolume,
   type VoiceGenderPref,
 } from "@/lib/storage";
-import { playClickSound, playLoseSound, playWhooshSound, playWinSound, speakText } from "@/lib/sound";
+import {
+  playAllInSound,
+  playCardDealSound,
+  playCardFlipSound,
+  playCheckSound,
+  playChipSound,
+  playClickSound,
+  playFoldSound,
+  playLoseSound,
+  playPokerWinSound,
+  playWhooshSound,
+  playWinSound,
+  speakText,
+} from "@/lib/sound";
 import { pickVoiceForGender } from "@/lib/voice";
 
-type SfxType = "click" | "whoosh" | "win" | "lose";
+export type SfxType =
+  | "click"
+  | "whoosh"
+  | "win"
+  | "lose"
+  | "pokerDeal"
+  | "pokerFlip"
+  | "pokerChip"
+  | "pokerCheck"
+  | "pokerFold"
+  | "pokerWin"
+  | "pokerAllIn";
 
 interface SoundContextValue {
   muted: boolean;
@@ -42,6 +66,13 @@ const SFX_PLAYERS: Record<SfxType, (volume: number) => void> = {
   whoosh: playWhooshSound,
   win: playWinSound,
   lose: playLoseSound,
+  pokerDeal: playCardDealSound,
+  pokerFlip: playCardFlipSound,
+  pokerChip: playChipSound,
+  pokerCheck: playCheckSound,
+  pokerFold: playFoldSound,
+  pokerWin: playPokerWinSound,
+  pokerAllIn: playAllInSound,
 };
 
 export function SoundProvider({ children }: { children: ReactNode }) {

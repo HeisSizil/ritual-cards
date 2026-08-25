@@ -14,10 +14,12 @@ export function WhotIntro({
   players,
   handSize,
   onComplete,
+  onCardDealt,
 }: {
   players: IntroSeat[];
   handSize: number;
   onComplete: () => void;
+  onCardDealt?: () => void;
 }) {
   const [phase, setPhase] = useState<"shuffle" | "deal">("shuffle");
   const [dealtCount, setDealtCount] = useState(0);
@@ -45,7 +47,10 @@ export function WhotIntro({
       const t = window.setTimeout(onComplete, SETTLE_MS);
       return () => window.clearTimeout(t);
     }
-    const t = window.setTimeout(() => setDealtCount((c) => c + 1), dealInterval);
+    const t = window.setTimeout(() => {
+      setDealtCount((c) => c + 1);
+      onCardDealt?.();
+    }, dealInterval);
     return () => window.clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, dealtCount, totalCards, dealInterval]);

@@ -8,16 +8,18 @@ export function PlayingCardView({
   dealt = false,
   highlight = false,
   style,
+  className,
 }: {
   card: Card;
   size?: "sm" | "md" | "lg";
   dealt?: boolean;
   highlight?: boolean;
   style?: React.CSSProperties;
+  className?: string;
 }) {
   const color = SUIT_COLOR[card.suit];
   const colorClass = color === "red" ? "card-red" : "card-black";
-  const classes = ["playing-card", size === "lg" ? "lg" : size === "sm" ? "sm" : "", dealt ? "dealt" : ""].filter(Boolean).join(" ");
+  const classes = ["playing-card", size === "lg" ? "lg" : size === "sm" ? "sm" : "", dealt ? "dealt" : "", className ?? ""].filter(Boolean).join(" ");
 
   return (
     <div
