@@ -99,11 +99,7 @@ function MultiplayerContainer() {
 
     const refetch = async () => {
       const { data, error: err } = await supabase.from("games").select("*").eq("room_code", code).single();
-      if (err || !data) {
-        console.log("[room] refetch: no data or error for room_code:", code, err);
-        return;
-      }
-      console.log("[room] refetch: room_code:", code, "status:", data.status);
+      if (err || !data) return;
       setStatus(data.status as "waiting" | "active" | "finished" | "closed");
       setRoom(data.game_state as AnyRoomState);
     };
@@ -113,11 +109,7 @@ function MultiplayerContainer() {
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "games", filter: `room_code=eq.${code}` },
-        (payload) => {
-          const newRow = payload.new as Record<string, unknown>;
-          console.log("[room] realtime event:", payload.eventType, "new status:", newRow?.status, "room_code:", code);
-          refetch();
-        },
+        () => { refetch(); },
       )
       .subscribe();
     channelRef.current = channel;
@@ -129,40 +121,26 @@ function MultiplayerContainer() {
     };
   }, []);
 
-  useEffect(() => {
-    if (status !== "closed") return;
-    console.log("[room] status=closed detected. playerId:", playerId, "hostPlayerId:", hostPlayerIdRef.current);
-    if (hostPlayerIdRef.current === playerId) {
-      console.log("[room] I am the host — ignoring closed status (already leaving)");
-      setStatus("waiting");
-      return;
-    }
-    console.log("[room] I am not the host — redirecting to lobby");
-    if (channelRef.current) {
-      supabase.removeChannel(channelRef.current);
-      channelRef.current = null;
-    }
-    setHostLeftMsg("The host has left. Room closed.");
-    setScreen("choose");
-    setRoomId(null);
-    setRoom(null);
-    setStatus("waiting");
-    recordedRef.current = false;
-  }, [status]);
-
-  // Backup poll every 5 s for non-host players in case the realtime event is missed.
+  // Poll every 2 s — if the room is closed, redirect non-host players immediately.
   useEffect(() => {
     if (screen !== "room" || !roomCode) return;
     const pollId = setInterval(async () => {
-      const isHostPlayer = hostPlayerIdRef.current === playerId;
-      if (isHostPlayer) return;
+      if (hostPlayerIdRef.current === playerId) return;
       const { data } = await supabase.from("games").select("status").eq("room_code", roomCode).single();
-      console.log("[poll] room_code:", roomCode, "status:", data?.status);
       if (data?.status === "closed") {
-        console.log("[poll] Detected status: closed — triggering redirect");
-        setStatus("closed");
+        clearInterval(pollId);
+        if (channelRef.current) {
+          supabase.removeChannel(channelRef.current);
+          channelRef.current = null;
+        }
+        setHostLeftMsg("Host has left. Room closed.");
+        setScreen("choose");
+        setRoomId(null);
+        setRoom(null);
+        setStatus("waiting");
+        recordedRef.current = false;
       }
-    }, 5000);
+    }, 2000);
     return () => clearInterval(pollId);
   }, [screen, roomCode, playerId]);
 
@@ -323,19 +301,12 @@ function MultiplayerContainer() {
   }
 
   async function leaveRoom() {
-    const isHostLeaving = !!(room && room.hostPlayerId === playerId && roomId);
-    console.log("[leaveRoom] playerId:", playerId, "isHost:", isHostLeaving, "roomId:", roomId);
-    if (isHostLeaving) {
-      console.log("[leaveRoom] Host leaving — writing status: closed to Supabase for roomId:", roomId);
+    const isHost = !!(room && room.hostPlayerId === playerId && roomCode);
+    if (isHost) {
       try {
-        const { error: updateErr } = await supabase.from("games").update({ status: "closed" }).eq("id", roomId!);
-        if (updateErr) {
-          console.error("[leaveRoom] Failed to write status: closed:", updateErr);
-        } else {
-          console.log("[leaveRoom] Successfully wrote status: closed to Supabase");
-        }
-      } catch (e) {
-        console.error("[leaveRoom] Exception writing status: closed:", e);
+        await supabase.from("games").update({ status: "closed" }).eq("room_code", roomCode);
+      } catch {
+        /* best-effort */
       }
     }
     if (channelRef.current) {
