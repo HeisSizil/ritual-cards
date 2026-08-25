@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 import { UsernameGate } from "@/components/UsernameGate";
 import { ResultOverlay } from "@/components/ResultOverlay";
-import { SoundToggleButton } from "@/components/SoundToggleButton";
-import { VoiceChatButton, SpeakingDot } from "@/components/VoiceChatButton";
+import { PlayerProfileCard } from "@/components/PlayerProfileCard";
+import { VoiceChatButton } from "@/components/VoiceChatButton";
 import { TurnTimer } from "@/components/TurnTimer";
 import { WhotCardView, CardBackView } from "@/components/cards/WhotCardView";
 import { WhotIntro } from "@/components/whot/WhotIntro";
@@ -530,6 +530,7 @@ function RoomView({
   const timeoutRef = useRef<number | null>(null);
   const [pendingWhotCardId, setPendingWhotCardId] = useState<string | null>(null);
   const [showIntro, setShowIntro] = useState(false);
+  const [showLog, setShowLog] = useState(false);
   const hadGameRef = useRef(!!room.game);
   const prevGameRef = useRef<WhotGameState | null>(room.game);
   const processedFinishRef = useRef<WhotGameState | null>(null);
@@ -733,6 +734,7 @@ function RoomView({
         wager: WAGER,
         opponent: opponents.join(", ") || "Opponent",
         aiAssisted: room.aiAssist[mySeatId] ?? false,
+        mode: "pvp",
       });
       return;
     }
@@ -748,6 +750,7 @@ function RoomView({
       wager: WAGER,
       opponent: opponents.join(", ") || "Opponent",
       aiAssisted: room.aiAssist[mySeatId] ?? false,
+      mode: "pvp",
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [game?.status, tournament?.champion]);
@@ -771,12 +774,13 @@ function RoomView({
           </span>
           <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
             <VoiceChatButton voice={voiceChat} />
-            <SoundToggleButton />
             <button type="button" className="btn btn-ghost btn-sm" onClick={onLeave}>
               Leave room
             </button>
           </div>
         </div>
+
+        <PlayerProfileCard />
 
         <div className="panel" style={{ padding: "2.5rem", textAlign: "center", marginBottom: "1.5rem" }}>
           <div className="chip chip-gold" style={{ marginBottom: "1rem" }}>
@@ -821,7 +825,6 @@ function RoomView({
           </span>
           <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
             <VoiceChatButton voice={voiceChat} />
-            <SoundToggleButton />
             <button type="button" className="btn btn-ghost btn-sm" onClick={onLeave}>
               Leave room
             </button>
@@ -862,7 +865,6 @@ function RoomView({
           </span>
           <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
             <VoiceChatButton voice={voiceChat} />
-            <SoundToggleButton />
             <button type="button" className="btn btn-ghost btn-sm" onClick={onLeave}>
               Leave room
             </button>
@@ -906,29 +908,81 @@ function RoomView({
     );
   }
 
-  // I've already been knocked out in a previous round -- spectate the standings, not the board.
+  // I've been knocked out — show the live game board in spectator (read-only) mode.
   if (tournament && amIEliminated) {
+    const spectatorTop = topCard(game);
+    const spectators = tournament.eliminated.map((e) => seatName(e.seatId));
     return (
       <div className="container section" style={{ paddingBottom: "3rem" }}>
         <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: "0.75rem", marginBottom: "1.5rem" }}>
-          <span className="chip">
-            Room <span className="mono">{roomCode}</span>
-          </span>
+          <div style={{ display: "flex", gap: "0.6rem", alignItems: "center", flexWrap: "wrap" }}>
+            <span className="chip chip-pink">Spectating</span>
+            <span className="chip">Room <span className="mono">{roomCode}</span></span>
+            {tournament && (
+              <span className="chip chip-gold">Knockout · Round {tournament.round} · {tournament.remainingSeats.length} left</span>
+            )}
+          </div>
           <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
             <VoiceChatButton voice={voiceChat} />
-            <SoundToggleButton />
             <button type="button" className="btn btn-ghost btn-sm" onClick={onLeave}>
               Leave room
             </button>
           </div>
         </div>
-        <div className="panel" style={{ padding: "2rem", marginBottom: "1.5rem", textAlign: "center" }}>
-          <div className="chip chip-pink" style={{ marginBottom: "1rem" }}>
-            You're knocked out
-          </div>
-          <p style={{ color: "var(--gray-400)" }}>The remaining players are still battling it out. Standings update live below.</p>
+
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "0.6rem", marginBottom: "1rem" }}>
+          <span style={{ fontSize: "0.78rem", color: "var(--gray-500)" }}>Spectators:</span>
+          {spectators.map((name) => (
+            <span key={name} className="chip" style={{ opacity: 0.75, fontSize: "0.75rem" }}>{name}</span>
+          ))}
         </div>
-        <TournamentStandings tournament={tournament} seatName={seatName} mySeatId={mySeatId} />
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 280px", gap: "1.5rem" }} className="whot-layout">
+          <div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem", marginBottom: "1.5rem" }}>
+              {game.players.map((seatId) => {
+                const seat = room.seats.find((s) => s.id === seatId);
+                if (!seat) return null;
+                return (
+                  <div key={seatId} className="panel" style={{ padding: "0.75rem 1rem", minWidth: 150 }}>
+                    <SeatLabel
+                      label={seat.name}
+                      count={game.hands[seatId]?.length ?? 0}
+                      active={game.turn === seatId}
+                      accent="pink"
+                    />
+                    <div style={{ display: "flex", gap: "0.2rem", flexWrap: "wrap", marginTop: "0.4rem" }}>
+                      {(game.hands[seatId] ?? []).map((_, i) => (
+                        <CardBackView key={i} size="sm" />
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="panel" style={{ padding: "1.75rem", display: "flex", alignItems: "center", justifyContent: "center", gap: "2rem", flexWrap: "wrap", marginBottom: "2rem" }}>
+              <div style={{ textAlign: "center" }}>
+                <div className="data-label" style={{ marginBottom: "0.6rem" }}>Draw Pile ({game.drawPile.length})</div>
+                <CardBackView />
+              </div>
+              <div style={{ textAlign: "center" }}>
+                <div className="data-label" style={{ marginBottom: "0.6rem" }}>Top Card</div>
+                <WhotCardView card={spectatorTop} dealt />
+                {game.calledSuit && (
+                  <div className="chip chip-pink" style={{ marginTop: "0.75rem" }}>Called: {game.calledSuit}</div>
+                )}
+                {game.pendingPickThree > 0 && (
+                  <div className="chip chip-gold" style={{ marginTop: "0.75rem" }}>Pick Three pending — draw {game.pendingPickThree}</div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+            <TournamentStandings tournament={tournament} seatName={seatName} mySeatId={mySeatId} compact />
+          </div>
+        </div>
       </div>
     );
   }
@@ -985,13 +1039,15 @@ function RoomView({
   }
 
   const won = game.status === "finished" && game.winner === mySeatId;
-  const showResult = game.status !== "playing";
+  // Tournament rounds should NOT show the result overlay — the tournament flow renders its own screens.
+  const showResult = game.status !== "playing" && !tournament;
   const winnerName = game.winner ? seatName(game.winner) : null;
 
   return (
     <div className="container section" style={{ paddingBottom: "3rem" }}>
       <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: "0.75rem", marginBottom: "1.5rem" }}>
         <div style={{ display: "flex", gap: "0.6rem", alignItems: "center", flexWrap: "wrap" }}>
+          <PlayerProfileCard compact />
           <span className="chip chip-gold">Wager {WAGER} RITUAL</span>
           <span className="chip">
             Room <span className="mono">{roomCode}</span>
@@ -1005,7 +1061,14 @@ function RoomView({
         </div>
         <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
           <VoiceChatButton voice={voiceChat} />
-          <SoundToggleButton />
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={() => setShowLog((v) => !v)}
+            title={showLog ? "Hide match log" : "Show match log"}
+          >
+            {showLog ? "Hide Log" : "Match Log"}
+          </button>
           <button type="button" className="btn btn-ghost btn-sm" onClick={onLeave}>
             Leave room
           </button>
@@ -1049,7 +1112,7 @@ function RoomView({
         />
       )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 280px", gap: "1.5rem" }} className="whot-layout">
+      <div style={{ display: "grid", gridTemplateColumns: showLog ? "1fr 280px" : "1fr", gap: "1.5rem" }} className="whot-layout">
         <div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem", marginBottom: "1.5rem" }}>
             {opponents.map((seat) => (
@@ -1129,27 +1192,29 @@ function RoomView({
           </div>
         </div>
 
-        <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
-          {tournament && <TournamentStandings tournament={tournament} seatName={seatName} mySeatId={mySeatId} compact />}
-          <aside className="panel" style={{ padding: "1rem", maxHeight: 460, display: "flex", flexDirection: "column" }}>
-            <div className="data-label" style={{ marginBottom: "0.75rem" }}>
-              Match Log
-            </div>
-            <div style={{ overflowY: "auto", flex: 1, display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-              {game.log.map((entry) => (
-                <div
-                  key={entry.id}
-                  style={{
-                    fontSize: "0.8rem",
-                    color: entry.tone === "good" ? "var(--green)" : entry.tone === "bad" ? "var(--red)" : entry.tone === "special" ? "var(--gold)" : "var(--gray-400)",
-                  }}
-                >
-                  {entry.text}
-                </div>
-              ))}
-            </div>
-          </aside>
-        </div>
+        {showLog && (
+          <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+            {tournament && <TournamentStandings tournament={tournament} seatName={seatName} mySeatId={mySeatId} compact />}
+            <aside className="panel" style={{ padding: "1rem", maxHeight: 460, display: "flex", flexDirection: "column" }}>
+              <div className="data-label" style={{ marginBottom: "0.75rem" }}>
+                Match Log
+              </div>
+              <div style={{ overflowY: "auto", flex: 1, display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+                {game.log.map((entry) => (
+                  <div
+                    key={entry.id}
+                    style={{
+                      fontSize: "0.8rem",
+                      color: entry.tone === "good" ? "var(--green)" : entry.tone === "bad" ? "var(--red)" : entry.tone === "special" ? "var(--gold)" : "var(--gray-400)",
+                    }}
+                  >
+                    {entry.text}
+                  </div>
+                ))}
+              </div>
+            </aside>
+          </div>
+        )}
       </div>
 
       {pendingWhotCardId && (

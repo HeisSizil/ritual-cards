@@ -8,6 +8,7 @@ export interface MatchRecord {
   opponent: string;
   playedAt: number;
   aiAssisted?: boolean;
+  mode?: "ai" | "pvp";
 }
 
 export interface PlayerStats {
@@ -16,6 +17,9 @@ export interface PlayerStats {
   losses: number;
   totalWagered: number;
   totalWon: number;
+  winsVsAI: number;
+  winsPvP: number;
+  totalGames: number;
 }
 
 const KEYS = {
@@ -168,14 +172,24 @@ export function recordMatch(record: Omit<MatchRecord, "id" | "playedAt">): Match
     losses: 0,
     totalWagered: 0,
     totalWon: 0,
+    winsVsAI: 0,
+    winsPvP: 0,
+    totalGames: 0,
   };
+  // Migrate old records that may lack new fields
+  existing.winsVsAI = existing.winsVsAI ?? 0;
+  existing.winsPvP = existing.winsPvP ?? 0;
+  existing.totalGames = existing.totalGames ?? (existing.wins + existing.losses);
   existing.totalWagered += record.wager;
   if (record.result === "win") {
     existing.wins += 1;
     existing.totalWon += record.wager * 2;
+    if (record.mode === "ai") existing.winsVsAI += 1;
+    else existing.winsPvP += 1;
   } else {
     existing.losses += 1;
   }
+  existing.totalGames = existing.wins + existing.losses;
   all[username] = existing;
   writeStats(all);
 
@@ -202,6 +216,20 @@ export function setPokerBalance(value: number): void {
   } catch {
     /* ignore */
   }
+}
+
+export function getMyStats(): PlayerStats | null {
+  const username = getUsername();
+  if (!username) return null;
+  const all = readStats();
+  const s = all[username];
+  if (!s) return null;
+  return {
+    ...s,
+    winsVsAI: s.winsVsAI ?? 0,
+    winsPvP: s.winsPvP ?? 0,
+    totalGames: s.totalGames ?? (s.wins + s.losses),
+  };
 }
 
 export function getSoundMuted(): boolean {

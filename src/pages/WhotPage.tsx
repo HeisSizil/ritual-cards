@@ -2,7 +2,7 @@ import { useEffect, useReducer, useRef, useState } from "react";
 import { UsernameGate } from "@/components/UsernameGate";
 import { ModeSelect, type PlayMode } from "@/components/ModeSelect";
 import { ResultOverlay } from "@/components/ResultOverlay";
-import { SoundToggleButton } from "@/components/SoundToggleButton";
+import { PlayerProfileCard } from "@/components/PlayerProfileCard";
 import { WhotCardView, CardBackView } from "@/components/cards/WhotCardView";
 import { WhotIntro } from "@/components/whot/WhotIntro";
 import { useUsername } from "@/context/UsernameContext";
@@ -74,6 +74,7 @@ function WhotBoard({ mode, onExit }: { mode: PlayMode; onExit: () => void }) {
   const [state, dispatch] = useReducer(reducer, undefined, createWhotGame);
   const [pendingWhotCardId, setPendingWhotCardId] = useState<string | null>(null);
   const [showIntro, setShowIntro] = useState(true);
+  const [showLog, setShowLog] = useState(false);
   const stateRef = useRef(state);
   const prevStateRef = useRef(state);
   const timeoutRef = useRef<number | null>(null);
@@ -199,6 +200,7 @@ function WhotBoard({ mode, onExit }: { mode: PlayMode; onExit: () => void }) {
       wager: WAGER,
       opponent: "Ritual AI",
       aiAssisted: playerIsAiControlled,
+      mode: "ai",
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.status, playerIsAiControlled]);
@@ -264,21 +266,29 @@ function WhotBoard({ mode, onExit }: { mode: PlayMode; onExit: () => void }) {
   return (
     <div className="container section" style={{ paddingBottom: "3rem" }}>
       <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: "0.75rem", marginBottom: "1.5rem" }}>
-        <div style={{ display: "flex", gap: "0.6rem", alignItems: "center" }}>
+        <div style={{ display: "flex", gap: "0.6rem", alignItems: "center", flexWrap: "wrap" }}>
+          <PlayerProfileCard compact />
           <span className="chip chip-gold">Wager {WAGER} RITUAL</span>
           {playerIsAiControlled && (
             <span className="chip chip-pink">AI playing for {username} · {strategyMeta(aiProfile).label}</span>
           )}
         </div>
         <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
-          <SoundToggleButton />
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={() => setShowLog((v) => !v)}
+            title={showLog ? "Hide match log" : "Show match log"}
+          >
+            {showLog ? "Hide Log" : "Match Log"}
+          </button>
           <button type="button" className="btn btn-ghost btn-sm" onClick={onExit}>
             Leave table
           </button>
         </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 280px", gap: "1.5rem" }} className="whot-layout">
+      <div style={{ display: "grid", gridTemplateColumns: showLog ? "1fr 280px" : "1fr", gap: "1.5rem" }} className="whot-layout">
         <div>
           {/* Opponent */}
           <SeatBar
@@ -365,25 +375,27 @@ function WhotBoard({ mode, onExit }: { mode: PlayMode; onExit: () => void }) {
         </div>
 
         {/* Log panel */}
-        <aside className="panel" style={{ padding: "1rem", maxHeight: 520, display: "flex", flexDirection: "column" }}>
-          <div className="data-label" style={{ marginBottom: "0.75rem" }}>
-            Match Log
-          </div>
-          <div style={{ overflowY: "auto", flex: 1, display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-            {state.log.map((entry) => (
-              <div
-                key={entry.id}
-                style={{
-                  fontSize: "0.8rem",
-                  color: entry.tone === "good" ? "var(--green)" : entry.tone === "bad" ? "var(--red)" : entry.tone === "special" ? "var(--gold)" : "var(--gray-400)",
-                }}
-              >
-                {entry.text}
-              </div>
-            ))}
-            <div ref={logEndRef} />
-          </div>
-        </aside>
+        {showLog && (
+          <aside className="panel" style={{ padding: "1rem", maxHeight: 520, display: "flex", flexDirection: "column" }}>
+            <div className="data-label" style={{ marginBottom: "0.75rem" }}>
+              Match Log
+            </div>
+            <div style={{ overflowY: "auto", flex: 1, display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+              {state.log.map((entry) => (
+                <div
+                  key={entry.id}
+                  style={{
+                    fontSize: "0.8rem",
+                    color: entry.tone === "good" ? "var(--green)" : entry.tone === "bad" ? "var(--red)" : entry.tone === "special" ? "var(--gold)" : "var(--gray-400)",
+                  }}
+                >
+                  {entry.text}
+                </div>
+              ))}
+              <div ref={logEndRef} />
+            </div>
+          </aside>
+        )}
       </div>
 
       {pendingWhotCardId && (
