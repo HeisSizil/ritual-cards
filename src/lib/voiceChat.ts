@@ -42,10 +42,23 @@ function detectVoiceSupport(): boolean {
   }
 }
 
+function isStalePC(pc: RTCPeerConnection): boolean {
+  return ["failed", "closed", "disconnected"].includes(pc.connectionState);
+}
+
 /**
  * WebRTC mesh voice chat over Supabase broadcast signaling.
- * Each pair of players who both have mic enabled establishes a direct P2P audio connection.
- * The player with the lexicographically larger playerId always initiates the offer.
+ *
+ * Receiving audio is completely passive — no button click required.
+ * Only sending audio requires enabling the mic.
+ *
+ * Protocol:
+ *   join          → voice-query  (discover who has mic on)
+ *   speaker       → voice-ready  (I have mic; reply to queries and on mic-enable)
+ *   listener      → listener-ready (please send me your audio)
+ *   speaker rx listener-ready → creates offer (speaker always initiates)
+ *   two speakers  → higher playerId initiates
+ *   mic off       → voice-gone + listener-ready (rejoin as passive listener)
  */
 export function useVoiceChat(
   roomCode: string | null,
@@ -58,7 +71,6 @@ export function useVoiceChat(
   const [speaking, setSpeaking] = useState<Record<string, boolean>>({});
   const [connState, setConnState] = useState<Record<string, VoiceConnState>>({});
 
-  // All mutable state lives here — avoids stale closures in callbacks
   const ctx = useRef({
     micEnabled: false,
     micMuted: false,
@@ -73,8 +85,6 @@ export function useVoiceChat(
     toggleBusy: false,
   });
   ctx.current.myPlayerId = myPlayerId;
-
-  // --- imperative helpers (all read from ctx.current + stable state setters) ---
 
   function sendSig(msg: SigMsg) {
     ctx.current.channel?.send({ type: "broadcast", event: "voice", payload: msg });
@@ -146,6 +156,7 @@ export function useVoiceChat(
     ctx.current.pcs.set(peerId, pc);
     setConnState(prev => ({ ...prev, [peerId]: "connecting" }));
 
+    // Add local audio only if we're a speaker
     ctx.current.localStream?.getTracks().forEach(t => {
       pc.addTrack(t, ctx.current.localStream!);
     });
@@ -164,6 +175,7 @@ export function useVoiceChat(
       }
     };
 
+    // Receiving audio is passive — fires for listeners too
     pc.ontrack = (e) => {
       const stream = e.streams[0];
       if (!stream) return;
@@ -190,33 +202,52 @@ export function useVoiceChat(
     return pc;
   }
 
-  // Signal handler — re-assigned each render but only reads ctx.current so always correct
   const handleSigRef = useRef<(msg: SigMsg) => void>(() => {});
   handleSigRef.current = async (msg: SigMsg) => {
     if (msg.from === ctx.current.myPlayerId) return;
     const myId = ctx.current.myPlayerId;
 
     if (msg.type === "voice-query") {
-      if (ctx.current.micEnabled) sendSig({ type: "voice-ready", from: myId });
-      else if (!ctx.current.pcs.has(msg.from)) sendSig({ type: "listener-ready", from: myId });
+      // Only speakers respond — listeners are silent until they hear a voice-ready
+      if (ctx.current.micEnabled) {
+        sendSig({ type: "voice-ready", from: myId });
+      }
+
     } else if (msg.type === "voice-ready") {
       ctx.current.voiceReady.add(msg.from);
+
       if (ctx.current.micEnabled) {
-        if (myId > msg.from) createPC(msg.from, true);
-      } else if (!ctx.current.pcs.has(msg.from)) {
-        sendSig({ type: "listener-ready", from: myId });
+        // Both have mic: higher playerId initiates to prevent duplicate connections
+        if (myId > msg.from) {
+          const ep = ctx.current.pcs.get(msg.from);
+          if (!ep || isStalePC(ep)) createPC(msg.from, true);
+        }
+        // Lower ID waits — the higher-ID peer will initiate when they receive our voice-ready
+      } else {
+        // Passive listener: signal the speaker to open a connection toward us
+        const ep = ctx.current.pcs.get(msg.from);
+        if (!ep || isStalePC(ep)) {
+          sendSig({ type: "listener-ready", from: myId });
+        }
       }
+
     } else if (msg.type === "listener-ready") {
-      if (ctx.current.micEnabled && !ctx.current.pcs.has(msg.from)) {
-        createPC(msg.from, true);
+      // Speaker receives this and initiates the connection
+      if (ctx.current.micEnabled) {
+        const ep = ctx.current.pcs.get(msg.from);
+        if (!ep || isStalePC(ep)) {
+          createPC(msg.from, true);
+        }
       }
+
     } else if (msg.type === "voice-gone") {
       ctx.current.voiceReady.delete(msg.from);
       closePC(msg.from);
+
     } else if (msg.type === "rtc-offer" && msg.to === myId) {
+      // Auto-accept offers — no button click needed to receive audio
       const pc = createPC(msg.from, false);
       await pc.setRemoteDescription(msg.sdp).catch(() => {});
-      // Drain any ICE candidates that arrived before the offer
       const buffered = ctx.current.iceBufs.get(msg.from) ?? [];
       ctx.current.iceBufs.delete(msg.from);
       for (const c of buffered) await pc.addIceCandidate(c).catch(() => {});
@@ -224,6 +255,7 @@ export function useVoiceChat(
       if (!answer || pc.signalingState === "closed") return;
       await pc.setLocalDescription(answer).catch(() => {});
       sendSig({ type: "rtc-answer", from: myId, to: msg.from, sdp: answer });
+
     } else if (msg.type === "rtc-answer" && msg.to === myId) {
       const pc = ctx.current.pcs.get(msg.from);
       if (pc) {
@@ -232,6 +264,7 @@ export function useVoiceChat(
         ctx.current.iceBufs.delete(msg.from);
         for (const c of buffered) await pc.addIceCandidate(c).catch(() => {});
       }
+
     } else if (msg.type === "ice-candidate" && msg.to === myId) {
       const pc = ctx.current.pcs.get(msg.from);
       if (pc && pc.remoteDescription) {
@@ -244,7 +277,7 @@ export function useVoiceChat(
     }
   };
 
-  // Supabase broadcast channel for signaling (separate from the game channel)
+  // Supabase broadcast channel for signaling
   useEffect(() => {
     if (!roomCode || !voiceSupported) return;
     const channel = supabase
@@ -254,7 +287,9 @@ export function useVoiceChat(
       })
       .subscribe((_status) => {
         if (_status === "SUBSCRIBED") {
-          sendSig({ type: "listener-ready", from: ctx.current.myPlayerId });
+          ctx.current.channel = channel;
+          // Discover any speakers already in the room — receiving is automatic
+          sendSig({ type: "voice-query", from: ctx.current.myPlayerId });
         }
       });
     ctx.current.channel = channel;
@@ -269,6 +304,7 @@ export function useVoiceChat(
     ctx.current.toggleBusy = true;
     try {
       if (ctx.current.micEnabled) {
+        // Turn mic off — become a passive listener again
         ctx.current.micEnabled = false;
         ctx.current.micMuted = false;
         setMicEnabled(false);
@@ -277,27 +313,41 @@ export function useVoiceChat(
         ctx.current.localStream = null;
         const ids = [...ctx.current.pcs.keys()];
         ids.forEach(id => closePC(id));
-        const hadPeers = ctx.current.voiceReady.size > 0;
         ctx.current.voiceReady.clear();
         sendSig({ type: "voice-gone", from: ctx.current.myPlayerId });
-        if (hadPeers) sendSig({ type: "listener-ready", from: ctx.current.myPlayerId });
+        // Re-announce as listener so speakers reconnect to us passively
+        sendSig({ type: "listener-ready", from: ctx.current.myPlayerId });
       } else {
+        // Turn mic on — become a speaker
         try {
           const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+
+          // Tell remote peers to drop any existing listener-only PCs for us
+          // so the new voice-ready triggers a clean bidirectional reconnect
+          if (ctx.current.pcs.size > 0) {
+            sendSig({ type: "voice-gone", from: ctx.current.myPlayerId });
+          }
+
+          // Close our local listener PCs before rebuilding with audio
+          const existingIds = [...ctx.current.pcs.keys()];
+          existingIds.forEach(id => closePC(id));
+
           ctx.current.localStream = stream;
           ctx.current.micEnabled = true;
           setMicEnabled(true);
-          // Announce and discover who else is ready
+
+          // Announce as speaker and rediscover peers
           sendSig({ type: "voice-ready", from: ctx.current.myPlayerId });
           sendSig({ type: "voice-query", from: ctx.current.myPlayerId });
-          // Connect to anyone already ready with a lower ID
+
+          // Proactively connect to known speakers where we have the higher ID
           ctx.current.voiceReady.forEach(peerId => {
-            if (ctx.current.myPlayerId > peerId && !ctx.current.pcs.has(peerId)) {
+            if (ctx.current.myPlayerId > peerId) {
               createPC(peerId, true);
             }
           });
         } catch {
-          /* mic permission denied or not supported */
+          /* mic permission denied or hardware not available */
         }
       }
     } finally {
