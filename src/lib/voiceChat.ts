@@ -11,6 +11,7 @@ type SigMsg =
   | { type: "voice-ready"; from: string }
   | { type: "voice-gone"; from: string }
   | { type: "voice-query"; from: string }
+  | { type: "listener-ready"; from: string }
   | { type: "rtc-offer"; from: string; to: string; sdp: RTCSessionDescriptionInit }
   | { type: "rtc-answer"; from: string; to: string; sdp: RTCSessionDescriptionInit }
   | { type: "ice-candidate"; from: string; to: string; candidate: RTCIceCandidateInit };
@@ -196,18 +197,23 @@ export function useVoiceChat(
     const myId = ctx.current.myPlayerId;
 
     if (msg.type === "voice-query") {
-      // Another player just enabled their mic and wants to discover who is already ready
       if (ctx.current.micEnabled) sendSig({ type: "voice-ready", from: myId });
+      else if (!ctx.current.pcs.has(msg.from)) sendSig({ type: "listener-ready", from: myId });
     } else if (msg.type === "voice-ready") {
       ctx.current.voiceReady.add(msg.from);
-      if (ctx.current.micEnabled && !ctx.current.pcs.has(msg.from) && myId > msg.from) {
+      if (ctx.current.micEnabled) {
+        if (myId > msg.from) createPC(msg.from, true);
+      } else if (!ctx.current.pcs.has(msg.from)) {
+        sendSig({ type: "listener-ready", from: myId });
+      }
+    } else if (msg.type === "listener-ready") {
+      if (ctx.current.micEnabled && !ctx.current.pcs.has(msg.from)) {
         createPC(msg.from, true);
       }
     } else if (msg.type === "voice-gone") {
       ctx.current.voiceReady.delete(msg.from);
       closePC(msg.from);
     } else if (msg.type === "rtc-offer" && msg.to === myId) {
-      if (!ctx.current.micEnabled) return;
       const pc = createPC(msg.from, false);
       await pc.setRemoteDescription(msg.sdp).catch(() => {});
       // Drain any ICE candidates that arrived before the offer
@@ -246,7 +252,11 @@ export function useVoiceChat(
       .on("broadcast", { event: "voice" }, ({ payload }) => {
         handleSigRef.current(payload as SigMsg);
       })
-      .subscribe();
+      .subscribe((_status) => {
+        if (_status === "SUBSCRIBED") {
+          sendSig({ type: "listener-ready", from: ctx.current.myPlayerId });
+        }
+      });
     ctx.current.channel = channel;
     return () => {
       supabase.removeChannel(channel);
@@ -267,8 +277,10 @@ export function useVoiceChat(
         ctx.current.localStream = null;
         const ids = [...ctx.current.pcs.keys()];
         ids.forEach(id => closePC(id));
+        const hadPeers = ctx.current.voiceReady.size > 0;
         ctx.current.voiceReady.clear();
         sendSig({ type: "voice-gone", from: ctx.current.myPlayerId });
+        if (hadPeers) sendSig({ type: "listener-ready", from: ctx.current.myPlayerId });
       } else {
         try {
           const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });

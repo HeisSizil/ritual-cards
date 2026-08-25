@@ -84,10 +84,12 @@ function MultiplayerContainer() {
   const [roomId, setRoomId] = useState<string | null>(null);
   const [roomCode, setRoomCode] = useState("");
   const [mySeatId, setMySeatId] = useState<SeatId>("seat-0");
-  const [status, setStatus] = useState<"waiting" | "active" | "finished">("waiting");
+  const [status, setStatus] = useState<"waiting" | "active" | "finished" | "closed">("waiting");
   const [room, setRoom] = useState<AnyRoomState | null>(null);
   const channelRef = useRef<RealtimeChannel | null>(null);
   const recordedRef = useRef(false);
+  const [hostLeftMsg, setHostLeftMsg] = useState("");
+  const hostPlayerIdRef = useRef<string | null>(null);
 
   const subscribe = useCallback((code: string) => {
     if (channelRef.current) {
@@ -98,7 +100,7 @@ function MultiplayerContainer() {
     const refetch = async () => {
       const { data, error: err } = await supabase.from("games").select("*").eq("room_code", code).single();
       if (err || !data) return;
-      setStatus(data.status);
+      setStatus(data.status as "waiting" | "active" | "finished" | "closed");
       setRoom(data.game_state as AnyRoomState);
     };
 
@@ -121,9 +123,28 @@ function MultiplayerContainer() {
     };
   }, []);
 
+  useEffect(() => {
+    if (status !== "closed") return;
+    if (hostPlayerIdRef.current === playerId) {
+      setStatus("waiting");
+      return;
+    }
+    if (channelRef.current) {
+      supabase.removeChannel(channelRef.current);
+      channelRef.current = null;
+    }
+    setHostLeftMsg("The host has left. Room closed.");
+    setScreen("choose");
+    setRoomId(null);
+    setRoom(null);
+    setStatus("waiting");
+    recordedRef.current = false;
+  }, [status]);
+
   async function createRoom() {
     setBusy(true);
     setError("");
+    setHostLeftMsg("");
     try {
       const code = generateRoomCode();
       const hostSeat: SeatInfo = { id: "seat-0", playerId, name: username ?? "Player 1" };
@@ -160,6 +181,7 @@ function MultiplayerContainer() {
         .select()
         .single();
       if (err || !data) throw err ?? new Error("Could not create room");
+      hostPlayerIdRef.current = playerId;
       setRoomId(data.id);
       setRoomCode(code);
       setMySeatId("seat-0");
@@ -179,6 +201,7 @@ function MultiplayerContainer() {
     if (!code) return;
     setBusy(true);
     setError("");
+    setHostLeftMsg("");
     try {
       const { data: found, error: findErr } = await supabase
         .from("games")
@@ -213,10 +236,11 @@ function MultiplayerContainer() {
         .single();
       if (updErr || !data) throw updErr ?? new Error("Could not join room");
 
+      hostPlayerIdRef.current = current.hostPlayerId;
       setRoomId(data.id);
       setRoomCode(code);
       setMySeatId(seatId);
-      setStatus(data.status);
+      setStatus(data.status as "waiting" | "active" | "finished");
       setRoom(data.game_state as AnyRoomState);
       subscribe(code);
       setScreen("room");
@@ -273,7 +297,14 @@ function MultiplayerContainer() {
     }
   }
 
-  function leaveRoom() {
+  async function leaveRoom() {
+    if (room && room.hostPlayerId === playerId && roomId) {
+      try {
+        await supabase.from("games").update({ status: "closed" }).eq("id", roomId);
+      } catch {
+        /* best-effort */
+      }
+    }
     if (channelRef.current) {
       supabase.removeChannel(channelRef.current);
       channelRef.current = null;
@@ -352,6 +383,11 @@ function MultiplayerContainer() {
           </div>
         </div>
 
+        {hostLeftMsg && (
+          <p style={{ color: "var(--gold)", marginTop: "1.25rem", fontSize: "0.9rem", textAlign: "center" }}>
+            {hostLeftMsg}
+          </p>
+        )}
         {error && (
           <p className="shake" style={{ color: "var(--red)", marginTop: "1.25rem", fontSize: "0.9rem" }}>
             {error}
@@ -373,7 +409,7 @@ function MultiplayerContainer() {
     return (
       <PokerRoomView
         room={room}
-        status={status}
+        status={status as "waiting" | "active" | "finished"}
         mySeatId={mySeatId}
         playerId={playerId}
         roomCode={roomCode}
@@ -389,7 +425,7 @@ function MultiplayerContainer() {
   return (
     <RoomView
       room={room}
-      status={status}
+      status={status as "waiting" | "active" | "finished"}
       mySeatId={mySeatId}
       playerId={playerId}
       roomCode={roomCode}
