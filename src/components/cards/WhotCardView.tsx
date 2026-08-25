@@ -230,7 +230,22 @@ export function WhotCardView({
             Whot
           </span>
         ) : (
-          <CornerMini suit={card.suit} />
+          <>
+            <CornerMini suit={card.suit} />
+            {card.suit === "Star" && card.secondNumber != null && (
+              <span
+                style={{
+                  fontSize: "0.48rem",
+                  fontWeight: 700,
+                  color: CARD_COLOR,
+                  lineHeight: 1,
+                  marginTop: 1,
+                }}
+              >
+                {card.secondNumber}
+              </span>
+            )}
+          </>
         )}
       </div>
 
@@ -257,7 +272,22 @@ export function WhotCardView({
             Whot
           </span>
         ) : (
-          <CornerMini suit={card.suit} />
+          <>
+            <CornerMini suit={card.suit} />
+            {card.suit === "Star" && card.secondNumber != null && (
+              <span
+                style={{
+                  fontSize: "0.48rem",
+                  fontWeight: 700,
+                  color: CARD_COLOR,
+                  lineHeight: 1,
+                  marginTop: 1,
+                }}
+              >
+                {card.secondNumber}
+              </span>
+            )}
+          </>
         )}
       </div>
     </div>

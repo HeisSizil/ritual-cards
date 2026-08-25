@@ -303,10 +303,19 @@ function MultiplayerContainer() {
   async function leaveRoom() {
     const isHost = !!(room && room.hostPlayerId === playerId && roomCode);
     if (isHost) {
-      try {
-        await supabase.from("games").update({ status: "closed" }).eq("room_code", roomCode);
-      } catch {
-        /* best-effort */
+      console.log("[leaveRoom] roomCode=", roomCode, "roomId=", roomId);
+      const { data, error } = await supabase
+        .from("games")
+        .update({ status: "closed" })
+        .eq("room_code", roomCode);
+      console.log("[leaveRoom] update by room_code →", { data, error });
+      if (error && roomId) {
+        console.log("[leaveRoom] retrying with id=", roomId);
+        const { data: d2, error: e2 } = await supabase
+          .from("games")
+          .update({ status: "closed" })
+          .eq("id", roomId);
+        console.log("[leaveRoom] update by id →", { data: d2, error: e2 });
       }
     }
     if (channelRef.current) {
