@@ -3,17 +3,17 @@
   --card-h: 108px;
   width: var(--card-w);
   height: var(--card-h);
-  border-radius: 10px;
-  background: #fdfdfb;
-  color: #14151a;
-  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 8px;
+  background: #ffffff;
+  color: #7B1818;
+  border: 1px solid rgba(0, 0, 0, 0.18);
   box-shadow: 0 6px 16px -6px rgba(0, 0, 0, 0.55), 0 1px 0 rgba(255, 255, 255, 0.5) inset;
   position: relative;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  padding: 6px 7px;
-  font-family: var(--font-body);
+  padding: 5px 6px;
+  font-family: Georgia, 'Times New Roman', serif;
   user-select: none;
   flex-shrink: 0;
   transition: transform 0.15s ease, box-shadow 0.15s ease;
@@ -34,7 +34,7 @@
 }
 .playing-card.interactive:hover {
   transform: translateY(-10px);
-  box-shadow: 0 16px 28px -10px rgba(25, 209, 132, 0.35), 0 1px 0 rgba(255, 255, 255, 0.5) inset;
+  box-shadow: 0 16px 28px -10px rgba(123, 24, 24, 0.45), 0 1px 0 rgba(255, 255, 255, 0.5) inset;
 }
 
 .playing-card.disabled {
@@ -131,16 +131,59 @@
 }
 
 .whot-suit-icon {
-  width: 34px;
-  height: 34px;
+  width: 42px;
+  height: 42px;
 }
 .playing-card.lg .whot-suit-icon {
-  width: 48px;
-  height: 48px;
+  width: 60px;
+  height: 60px;
 }
 .playing-card.sm .whot-suit-icon {
-  width: 22px;
-  height: 22px;
+  width: 26px;
+  height: 26px;
+}
+
+/* ── Real Nigerian Whot card corners ── */
+.whot-corner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  z-index: 1;
+}
+.whot-corner-tl {
+  align-self: flex-start;
+}
+.whot-corner-br {
+  align-self: flex-end;
+  transform: rotate(180deg);
+}
+.whot-corner-number {
+  font-family: Georgia, 'Times New Roman', serif;
+  font-weight: 700;
+  font-size: 0.88rem;
+  color: #7B1818;
+  line-height: 1;
+}
+.playing-card.lg .whot-corner-number {
+  font-size: 1.15rem;
+}
+.playing-card.sm .whot-corner-number {
+  font-size: 0.6rem;
+}
+
+/* Mini suit icon in corners */
+.whot-mini-icon {
+  width: 11px;
+  height: 11px;
+}
+.playing-card.lg .whot-mini-icon {
+  width: 15px;
+  height: 15px;
+}
+.playing-card.sm .whot-mini-icon {
+  width: 7px;
+  height: 7px;
 }
 
 .whot-badge {
