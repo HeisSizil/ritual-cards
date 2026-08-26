@@ -2,12 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 import { supabase } from "./supabase";
 
-const AUDIO_UNLOCK_KEY = "ritual-audio-unlocked";
-
-function hasUnlockedBefore(): boolean {
-  try { return !!localStorage.getItem(AUDIO_UNLOCK_KEY); } catch { return false; }
-}
-
 const ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
@@ -34,10 +28,6 @@ export interface VoiceChatHook {
   speaking: Record<string, boolean>;
   /** playerId -> connection state */
   connState: Record<string, VoiceConnState>;
-  /** true if the browser hasn't allowed audio yet — show an unlock banner */
-  needsAudioUnlock: boolean;
-  /** call this when the user taps the unlock banner */
-  unlockAudio: () => void;
 }
 
 function detectVoiceSupport(): boolean {
@@ -80,9 +70,6 @@ export function useVoiceChat(
   const [micMuted, setMicMuted] = useState(false);
   const [speaking, setSpeaking] = useState<Record<string, boolean>>({});
   const [connState, setConnState] = useState<Record<string, VoiceConnState>>({});
-  const [needsAudioUnlock, setNeedsAudioUnlock] = useState(() =>
-    voiceSupported && !hasUnlockedBefore()
-  );
 
   const ctx = useRef({
     micEnabled: false,
@@ -169,7 +156,6 @@ export function useVoiceChat(
     ctx.current.pcs.set(peerId, pc);
     setConnState(prev => ({ ...prev, [peerId]: "connecting" }));
 
-    // Add local audio only if we're a speaker
     ctx.current.localStream?.getTracks().forEach(t => {
       pc.addTrack(t, ctx.current.localStream!);
     });
@@ -188,7 +174,6 @@ export function useVoiceChat(
       }
     };
 
-    // Receiving audio is passive — fires for listeners too
     pc.ontrack = (e) => {
       const stream = e.streams[0];
       if (!stream) return;
@@ -197,10 +182,6 @@ export function useVoiceChat(
         audio = document.createElement("audio");
         audio.id = `rtc-audio-${peerId}`;
         audio.autoplay = true;
-        audio.setAttribute("playsinline", "");
-        audio.muted = false;
-        // Keep as a real DOM element so the browser treats it as page media
-        audio.style.cssText = "position:absolute;left:-9999px;top:-9999px;width:1px;height:1px;";
         document.body.appendChild(audio);
       }
       audio.srcObject = stream;
@@ -225,7 +206,6 @@ export function useVoiceChat(
     const myId = ctx.current.myPlayerId;
 
     if (msg.type === "voice-query") {
-      // Only speakers respond — listeners are silent until they hear a voice-ready
       if (ctx.current.micEnabled) {
         sendSig({ type: "voice-ready", from: myId });
       }
@@ -234,14 +214,11 @@ export function useVoiceChat(
       ctx.current.voiceReady.add(msg.from);
 
       if (ctx.current.micEnabled) {
-        // Both have mic: higher playerId initiates to prevent duplicate connections
         if (myId > msg.from) {
           const ep = ctx.current.pcs.get(msg.from);
           if (!ep || isStalePC(ep)) createPC(msg.from, true);
         }
-        // Lower ID waits — the higher-ID peer will initiate when they receive our voice-ready
       } else {
-        // Passive listener: signal the speaker to open a connection toward us
         const ep = ctx.current.pcs.get(msg.from);
         if (!ep || isStalePC(ep)) {
           sendSig({ type: "listener-ready", from: myId });
@@ -249,7 +226,6 @@ export function useVoiceChat(
       }
 
     } else if (msg.type === "listener-ready") {
-      // Speaker receives this and initiates the connection
       if (ctx.current.micEnabled) {
         const ep = ctx.current.pcs.get(msg.from);
         if (!ep || isStalePC(ep)) {
@@ -262,7 +238,6 @@ export function useVoiceChat(
       closePC(msg.from);
 
     } else if (msg.type === "rtc-offer" && msg.to === myId) {
-      // Auto-accept offers — no button click needed to receive audio
       const pc = createPC(msg.from, false);
       await pc.setRemoteDescription(msg.sdp).catch(() => {});
       const buffered = ctx.current.iceBufs.get(msg.from) ?? [];
@@ -294,7 +269,6 @@ export function useVoiceChat(
     }
   };
 
-  // Supabase broadcast channel for signaling
   useEffect(() => {
     if (!roomCode || !voiceSupported) return;
     const channel = supabase
@@ -305,7 +279,6 @@ export function useVoiceChat(
       .subscribe((_status) => {
         if (_status === "SUBSCRIBED") {
           ctx.current.channel = channel;
-          // Discover any speakers already in the room — receiving is automatic
           sendSig({ type: "voice-query", from: ctx.current.myPlayerId });
         }
       });
@@ -321,7 +294,6 @@ export function useVoiceChat(
     ctx.current.toggleBusy = true;
     try {
       if (ctx.current.micEnabled) {
-        // Turn mic off — become a passive listener again
         ctx.current.micEnabled = false;
         ctx.current.micMuted = false;
         setMicEnabled(false);
@@ -332,20 +304,15 @@ export function useVoiceChat(
         ids.forEach(id => closePC(id));
         ctx.current.voiceReady.clear();
         sendSig({ type: "voice-gone", from: ctx.current.myPlayerId });
-        // Re-announce as listener so speakers reconnect to us passively
         sendSig({ type: "listener-ready", from: ctx.current.myPlayerId });
       } else {
-        // Turn mic on — become a speaker
         try {
           const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
 
-          // Tell remote peers to drop any existing listener-only PCs for us
-          // so the new voice-ready triggers a clean bidirectional reconnect
           if (ctx.current.pcs.size > 0) {
             sendSig({ type: "voice-gone", from: ctx.current.myPlayerId });
           }
 
-          // Close our local listener PCs before rebuilding with audio
           const existingIds = [...ctx.current.pcs.keys()];
           existingIds.forEach(id => closePC(id));
 
@@ -353,11 +320,9 @@ export function useVoiceChat(
           ctx.current.micEnabled = true;
           setMicEnabled(true);
 
-          // Announce as speaker and rediscover peers
           sendSig({ type: "voice-ready", from: ctx.current.myPlayerId });
           sendSig({ type: "voice-query", from: ctx.current.myPlayerId });
 
-          // Proactively connect to known speakers where we have the higher ID
           ctx.current.voiceReady.forEach(peerId => {
             if (ctx.current.myPlayerId > peerId) {
               createPC(peerId, true);
@@ -383,85 +348,6 @@ export function useVoiceChat(
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const unlockAudio = useCallback(() => {
-    if (ctx.current.audioCtx && ctx.current.audioCtx.state === "suspended") {
-      ctx.current.audioCtx.resume().catch(() => {});
-    }
-    document.querySelectorAll<HTMLAudioElement>("[id^='rtc-audio-']").forEach(el => {
-      el.play().catch(() => {});
-    });
-    try { localStorage.setItem(AUDIO_UNLOCK_KEY, "1"); } catch { /* ignore */ }
-    setNeedsAudioUnlock(false);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Inject a "Tap to enable audio" banner as a real DOM element so it appears on every page
-  // branch without requiring changes to each return statement in the host component.
-  useEffect(() => {
-    const BANNER_ID = "rtc-audio-unlock-banner";
-
-    if (!voiceSupported || !needsAudioUnlock) {
-      document.getElementById(BANNER_ID)?.remove();
-      return;
-    }
-
-    if (!document.getElementById("rtc-audio-unlock-kf")) {
-      const style = document.createElement("style");
-      style.id = "rtc-audio-unlock-kf";
-      style.textContent = `
-        @keyframes rtc-banner-pulse {
-          0%,100% { box-shadow: 0 4px 20px rgba(0,0,0,0.45), 0 0 0 0 rgba(201,168,76,0.6); }
-          50% { box-shadow: 0 4px 20px rgba(0,0,0,0.45), 0 0 0 10px rgba(201,168,76,0); }
-        }
-      `;
-      document.head.appendChild(style);
-    }
-
-    let banner = document.getElementById(BANNER_ID) as HTMLDivElement | null;
-    if (!banner) {
-      banner = document.createElement("div");
-      banner.id = BANNER_ID;
-      banner.setAttribute("role", "button");
-      banner.setAttribute("tabindex", "0");
-      banner.style.cssText = [
-        "position:fixed",
-        "bottom:1.25rem",
-        "left:50%",
-        "transform:translateX(-50%)",
-        "z-index:9999",
-        "background:#c9a84c",
-        "color:#111",
-        "padding:0.65rem 1.5rem",
-        "border-radius:2rem",
-        "font-weight:700",
-        "font-size:0.95rem",
-        "cursor:pointer",
-        "user-select:none",
-        "display:flex",
-        "align-items:center",
-        "gap:0.5rem",
-        "white-space:nowrap",
-        "font-family:inherit",
-        "border:none",
-        "outline:none",
-        "animation:rtc-banner-pulse 1.5s ease-in-out infinite",
-      ].join(";");
-      banner.innerHTML = "<span>🔊</span><span>Tap to enable voice audio</span>";
-      document.body.appendChild(banner);
-    }
-
-    const el = banner;
-    const handleClick = () => unlockAudio();
-    const handleKey = (e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") unlockAudio(); };
-    el.addEventListener("click", handleClick);
-    el.addEventListener("keydown", handleKey);
-    return () => {
-      el.removeEventListener("click", handleClick);
-      el.removeEventListener("keydown", handleKey);
-    };
-  }, [needsAudioUnlock, voiceSupported, unlockAudio]);
-
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
       ctx.current.localStream?.getTracks().forEach(t => t.stop());
@@ -471,10 +357,9 @@ export function useVoiceChat(
       ctx.current.rafs.clear();
       ctx.current.audioCtx?.close().catch?.(() => {});
       document.querySelectorAll("[id^='rtc-audio-']").forEach(el => el.remove());
-      document.getElementById("rtc-audio-unlock-banner")?.remove();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return { voiceSupported, micEnabled, micMuted, toggleMic, toggleMute, speaking, connState, needsAudioUnlock, unlockAudio };
+  return { voiceSupported, micEnabled, micMuted, toggleMic, toggleMute, speaking, connState };
 }
