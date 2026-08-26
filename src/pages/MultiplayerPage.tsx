@@ -11,14 +11,14 @@ import { PokerRoomView } from "@/components/poker/PokerRoomView";
 import { useUsername } from "@/context/UsernameContext";
 import { useSound } from "@/context/SoundContext";
 import { useVoiceChat } from "@/lib/voiceChat";
-import { supabase, generateRoomCode, getPersistentPlayerId } from "@/lib/supabase";
+import { supabase, generateRoomCode, getPersistentPlayerId, SUPABASE_URL, SUPABASE_ANON_KEY } from "@/lib/supabase";
 import { recordMatch, getPokerBalance } from "@/lib/storage";
 import { STRATEGIES, strategyMeta, type StrategyProfile } from "@/lib/aiStrategy";
 import { createWhotGame, endTurn, getPlayableCards, playCard, resolvePickThree, topCard, voluntaryDraw } from "@/games/whot/engine";
 import { chooseWhotMove, pickSuitToCall, shouldPlayDrawnCard } from "@/games/whot/ai";
 import { REAL_SUITS } from "@/games/whot/types";
 import type { WhotGameState, WhotPlayer, WhotSuit } from "@/games/whot/types";
-import { applyRoundResult, computeRoundResult, createTournament, handScore, type RoundResult, type TournamentState } from "@/games/whot/tournament";
+import { applyRoundResult, computeRoundResult, createTournament, handScore, type EliminationRecord, type RoundResult, type TournamentState } from "@/games/whot/tournament";
 import { dealNextPokerHand, type PokerRoomState } from "@/games/poker/multiplayerRoom";
 import type { MPPokerGameState } from "@/games/poker/multiplayerTypes";
 
@@ -40,6 +40,10 @@ interface WhotRoomState {
   aiProfile: Record<SeatId, StrategyProfile>;
   tournament: TournamentState | null; // set when the table started with 3+ players (Highest Hand Knockout)
   turnStartedAt?: number | null;
+  heartbeats?: Record<string, number>; // seatId -> last-seen timestamp ms
+  leftPlayers?: string[]; // usernames who clicked Leave
+  disconnectedPlayers?: string[]; // usernames who closed tab
+  consecutiveSkips?: Record<string, number>; // seatId -> consecutive auto-skipped turns
 }
 
 type RoomState = WhotRoomState;
@@ -53,6 +57,34 @@ const KNOCKOUT_MIN_PLAYERS = 3;
 const WHOT_TURN_SECS = 30;
 const WHOT_WARN_SECS = 10;
 const WHOT_HOST_GRACE_SECS = 5;
+const HEARTBEAT_INTERVAL_MS = 8000;
+const HEARTBEAT_STALE_MS = 16000;
+const HEARTBEAT_OFFLINE_MS = 30000;
+const DISCONNECT_WARN_SKIPS = 3;
+const DISCONNECT_ELIM_SKIPS = 5;
+
+const ROOM_SESSION_KEY = "ritual-cards:active-room";
+function saveRoomSession(roomCode: string, seatId: string) {
+  try { localStorage.setItem(ROOM_SESSION_KEY, JSON.stringify({ roomCode, seatId })); } catch {}
+}
+function clearRoomSession() {
+  try { localStorage.removeItem(ROOM_SESSION_KEY); } catch {}
+}
+function loadRoomSession(): { roomCode: string; seatId: string } | null {
+  try {
+    const raw = localStorage.getItem(ROOM_SESSION_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+
+type ConnStatus = "green" | "yellow" | "gray";
+function connStatus(heartbeat: number | undefined, now: number): ConnStatus {
+  if (!heartbeat) return "gray";
+  const age = now - heartbeat;
+  if (age < HEARTBEAT_STALE_MS) return "green";
+  if (age < HEARTBEAT_OFFLINE_MS) return "yellow";
+  return "gray";
+}
 
 export function MultiplayerPage() {
   return (
@@ -90,6 +122,10 @@ function MultiplayerContainer() {
   const recordedRef = useRef(false);
   const [hostLeftMsg, setHostLeftMsg] = useState("");
   const hostPlayerIdRef = useRef<string | null>(null);
+  const [reconnecting, setReconnecting] = useState(false);
+  const roomRef = useRef<AnyRoomState | null>(null);
+  const roomIdRef = useRef<string | null>(null);
+  const screenRef = useRef(screen);
 
   const subscribe = useCallback((code: string) => {
     if (channelRef.current) {
@@ -120,6 +156,78 @@ function MultiplayerContainer() {
       if (channelRef.current) supabase.removeChannel(channelRef.current);
     };
   }, []);
+
+  // Keep refs in sync with state so closures can read current values without stale captures.
+  useEffect(() => { roomRef.current = room; }, [room]);
+  useEffect(() => { roomIdRef.current = roomId; }, [roomId]);
+  useEffect(() => { screenRef.current = screen; }, [screen]);
+
+  // On first mount: check localStorage for a saved room session and silently rejoin if possible.
+  useEffect(() => {
+    const session = loadRoomSession();
+    if (!session) return;
+    setReconnecting(true);
+    (async () => {
+      try {
+        const { data } = await supabase.from("games").select("*").eq("room_code", session.roomCode).single();
+        if (!data || data.status === "closed") { clearRoomSession(); return; }
+        const rs = data.game_state as AnyRoomState;
+        const mySeat = rs.seats.find((s) => s.playerId === playerId);
+        if (!mySeat) { clearRoomSession(); return; }
+        hostPlayerIdRef.current = rs.hostPlayerId;
+        setRoomId(data.id);
+        setRoomCode(session.roomCode);
+        setMySeatId(mySeat.id as SeatId);
+        setStatus(data.status as "waiting" | "active" | "finished");
+        setRoom(rs);
+        subscribe(session.roomCode);
+        setScreen("room");
+      } catch { clearRoomSession(); }
+      finally { setReconnecting(false); }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Heartbeat: write this seat's timestamp into game_state.heartbeats every 8 s.
+  useEffect(() => {
+    if (screen !== "room" || !roomIdRef.current) return;
+    const id = setInterval(async () => {
+      const curr = roomRef.current;
+      const rid = roomIdRef.current;
+      if (!curr || !rid) return;
+      const next: AnyRoomState = {
+        ...curr,
+        heartbeats: { ...(curr as WhotRoomState).heartbeats, [mySeatId]: Date.now() },
+      } as AnyRoomState;
+      roomRef.current = next;
+      setRoom(next);
+      try { await supabase.from("games").update({ game_state: next }).eq("id", rid); } catch { /* best-effort */ }
+    }, HEARTBEAT_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [screen, mySeatId]);
+
+  // Mark player as disconnected when the tab is closed / refreshed.
+  useEffect(() => {
+    if (screen !== "room") return;
+    const handler = () => {
+      const curr = roomRef.current;
+      const rid = roomIdRef.current;
+      if (!curr || !rid || !username) return;
+      const myName = (curr as WhotRoomState).seats?.find((s) => s.playerId === playerId)?.name ?? username;
+      const next: AnyRoomState = {
+        ...curr,
+        disconnectedPlayers: [...((curr as WhotRoomState).disconnectedPlayers ?? []), myName],
+      } as AnyRoomState;
+      fetch(`${SUPABASE_URL}/rest/v1/games?id=eq.${rid}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
+        body: JSON.stringify({ game_state: next }),
+        keepalive: true,
+      });
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [screen, username, playerId]);
 
   // Poll every 2 s — if the room is closed, redirect non-host players immediately.
   useEffect(() => {
@@ -191,6 +299,7 @@ function MultiplayerContainer() {
       setStatus("waiting");
       setRoom(initialRoom);
       subscribe(code);
+      saveRoomSession(code, "seat-0");
       setScreen("room");
     } catch (e) {
       setError(supabaseErrorMessage(e));
@@ -246,6 +355,7 @@ function MultiplayerContainer() {
       setStatus(data.status as "waiting" | "active" | "finished");
       setRoom(data.game_state as AnyRoomState);
       subscribe(code);
+      saveRoomSession(code, seatId);
       setScreen("room");
     } catch (e) {
       setError(supabaseErrorMessage(e));
@@ -301,6 +411,16 @@ function MultiplayerContainer() {
   }
 
   async function leaveRoom() {
+    // Announce departure to other players before tearing down.
+    if (room && roomId) {
+      const myName = (room as WhotRoomState).seats?.find((s) => s.playerId === playerId)?.name ?? username ?? "Player";
+      const nextRoom: AnyRoomState = {
+        ...room,
+        leftPlayers: [...((room as WhotRoomState).leftPlayers ?? []), myName],
+      } as AnyRoomState;
+      try { await supabase.from("games").update({ game_state: nextRoom }).eq("id", roomId); } catch { /* best-effort */ }
+    }
+    clearRoomSession();
     const isHost = !!(room && room.hostPlayerId === playerId && roomCode);
     if (isHost) {
       console.log("[leaveRoom] roomCode=", roomCode, "roomId=", roomId);
@@ -327,6 +447,14 @@ function MultiplayerContainer() {
     setRoom(null);
     setStatus("waiting");
     recordedRef.current = false;
+  }
+
+  if (reconnecting) {
+    return (
+      <div className="container section" style={{ textAlign: "center" }}>
+        <p style={{ color: "var(--gray-400)" }}>Reconnecting…</p>
+      </div>
+    );
   }
 
   if (screen === "choose") {
@@ -537,9 +665,37 @@ function RoomView({
 
   const voiceChat = useVoiceChat(roomCode, playerId);
 
+  const [toasts, setToasts] = useState<{ id: number; msg: string }[]>([]);
+  const toastCounterRef = useRef(0);
+  const seenLeftRef = useRef<Set<string>>(new Set());
+  const seenDiscoRef = useRef<Set<string>>(new Set());
+
+  function showToast(msg: string) {
+    const id = ++toastCounterRef.current;
+    setToasts((prev) => [...prev, { id, msg }]);
+    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 5000);
+  }
+
   useEffect(() => {
     roomRef.current = room;
   }, [room]);
+
+  // Show toasts when players leave or disconnect.
+  useEffect(() => {
+    for (const name of room.leftPlayers ?? []) {
+      if (!seenLeftRef.current.has(name) && name !== username) {
+        seenLeftRef.current.add(name);
+        showToast(`${name} has left the game`);
+      }
+    }
+    for (const name of room.disconnectedPlayers ?? []) {
+      if (!seenDiscoRef.current.has(name) && name !== username) {
+        seenDiscoRef.current.add(name);
+        showToast(`${name} has disconnected`);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [room.leftPlayers, room.disconnectedPlayers]);
 
   // Play the shuffle/deal intro exactly once, the moment the host deals the game (lobby -> active).
   useEffect(() => {
@@ -712,7 +868,40 @@ function RoomView({
       if (!current.game || current.game.turn !== turnAtSchedule || current.game.status !== "playing") return;
       const g = current.game;
       const nextGame = g.pendingPickThree > 0 ? resolvePickThree(g, turnAtSchedule) : endTurn(voluntaryDraw(g, turnAtSchedule));
-      onWriteRoom({ ...current, game: nextGame, turnStartedAt: Date.now() });
+
+      const prevSkips = current.consecutiveSkips ?? {};
+      const newCount = (prevSkips[turnAtSchedule] ?? 0) + 1;
+      const updatedSkips = { ...prevSkips, [turnAtSchedule]: newCount };
+
+      let nextRoom: RoomState = { ...current, game: nextGame, turnStartedAt: Date.now(), consecutiveSkips: updatedSkips };
+
+      // Tournament elimination after too many consecutive skips.
+      if (
+        newCount >= DISCONNECT_ELIM_SKIPS &&
+        current.tournament &&
+        !current.tournament.champion &&
+        current.tournament.remainingSeats.includes(turnAtSchedule as WhotPlayer) &&
+        !current.tournament.eliminated.some((e) => e.seatId === turnAtSchedule)
+      ) {
+        const elim: EliminationRecord = {
+          seatId: turnAtSchedule as WhotPlayer,
+          round: current.tournament.round,
+          score: handScore((current.game?.hands[turnAtSchedule] ?? []) as import("@/games/whot/types").WhotCard[]),
+        };
+        const newRemaining = current.tournament.remainingSeats.filter((s) => s !== turnAtSchedule);
+        nextRoom = {
+          ...nextRoom,
+          tournament: {
+            ...current.tournament,
+            eliminated: [...current.tournament.eliminated, elim],
+            remainingSeats: newRemaining,
+            champion: newRemaining.length === 1 ? (newRemaining[0] as WhotPlayer) : current.tournament.champion,
+          },
+        };
+        showToast(`${seatName(turnAtSchedule as WhotPlayer)} was eliminated due to disconnection`);
+      }
+
+      onWriteRoom(nextRoom);
     }, delayMs);
 
     return () => window.clearTimeout(id);
@@ -950,6 +1139,7 @@ function RoomView({
                       count={game.hands[seatId]?.length ?? 0}
                       active={game.turn === seatId}
                       accent="pink"
+                      connectionStatus={connStatus(room.heartbeats?.[seatId], Date.now())}
                     />
                     <div style={{ display: "flex", gap: "0.2rem", flexWrap: "wrap", marginTop: "0.4rem" }}>
                       {(game.hands[seatId] ?? []).map((_, i) => (
@@ -995,20 +1185,22 @@ function RoomView({
   const canVoluntaryDraw = isManualMyTurn && !game.hasDrawnThisTurn;
   const top = topCard(game);
 
+  const resetMySkips = { consecutiveSkips: { ...room.consecutiveSkips, [mySeatId]: 0 } };
+
   function play(cardId: string, suit?: string) {
     if (!game) return;
     playSfx("click");
     const { state: nextGame } = playCard(game, mySeatId, cardId, suit);
-    onWriteRoom({ ...room, game: nextGame, turnStartedAt: Date.now() });
+    onWriteRoom({ ...room, ...resetMySkips, game: nextGame, turnStartedAt: Date.now() });
   }
 
   function handleDraw() {
     if (!game) return;
     playSfx("whoosh");
     if (game.pendingPickThree > 0) {
-      onWriteRoom({ ...room, game: resolvePickThree(game, mySeatId), turnStartedAt: Date.now() });
+      onWriteRoom({ ...room, ...resetMySkips, game: resolvePickThree(game, mySeatId), turnStartedAt: Date.now() });
     } else {
-      onWriteRoom({ ...room, game: endTurn(voluntaryDraw(game, mySeatId)), turnStartedAt: Date.now() });
+      onWriteRoom({ ...room, ...resetMySkips, game: endTurn(voluntaryDraw(game, mySeatId)), turnStartedAt: Date.now() });
     }
   }
 
@@ -1043,6 +1235,9 @@ function RoomView({
   const showResult = game.status !== "playing" && !tournament;
   const winnerName = game.winner ? seatName(game.winner) : null;
 
+  // Snapshot "now" once per render for consistent heartbeat age comparisons.
+  const now = Date.now();
+
   return (
     <div className="container section" style={{ paddingBottom: "3rem" }}>
       <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: "0.75rem", marginBottom: "1.5rem" }}>
@@ -1074,6 +1269,16 @@ function RoomView({
           </button>
         </div>
       </div>
+
+      {toasts.length > 0 && (
+        <div style={{ position: "fixed", top: "1rem", right: "1rem", zIndex: 200, display: "flex", flexDirection: "column", gap: "0.5rem", pointerEvents: "none" }}>
+          {toasts.map((t) => (
+            <div key={t.id} className="panel" style={{ padding: "0.6rem 1rem", fontSize: "0.85rem", color: "var(--gray-200)", maxWidth: 300, opacity: 0.95 }}>
+              {t.msg}
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="panel" style={{ padding: "1.25rem", marginBottom: "1.5rem", display: "flex", gap: "1rem", alignItems: "center", flexWrap: "wrap" }}>
         <button type="button" className={`btn ${room.aiAssist[mySeatId] ? "btn-pink" : "btn-ghost"} btn-sm`} onClick={toggleAiAssist}>
@@ -1115,17 +1320,27 @@ function RoomView({
       <div style={{ display: "grid", gridTemplateColumns: showLog ? "1fr 280px" : "1fr", gap: "1.5rem" }} className="whot-layout">
         <div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem", marginBottom: "1.5rem" }}>
-            {opponents.map((seat) => (
-              <div key={seat.id} className="panel" style={{ padding: "0.75rem 1rem", minWidth: 150 }}>
-                <SeatLabel
-                  label={seat.name + (room.aiAssist[seat.id] ? " · AI" : "")}
-                  count={game.hands[seat.id]?.length ?? 0}
-                  active={game.turn === seat.id}
-                  accent="pink"
-                  speaking={voiceChat.speaking[seat.playerId]}
-                />
-              </div>
-            ))}
+            {opponents.map((seat) => {
+              const skips = room.consecutiveSkips?.[seat.id] ?? 0;
+              const cs = connStatus(room.heartbeats?.[seat.id], now);
+              return (
+                <div key={seat.id} className="panel" style={{ padding: "0.75rem 1rem", minWidth: 150 }}>
+                  <SeatLabel
+                    label={seat.name + (room.aiAssist[seat.id] ? " · AI" : "")}
+                    count={game.hands[seat.id]?.length ?? 0}
+                    active={game.turn === seat.id}
+                    accent="pink"
+                    speaking={voiceChat.speaking[seat.playerId]}
+                    connectionStatus={cs}
+                  />
+                  {skips >= DISCONNECT_WARN_SKIPS && (
+                    <div style={{ fontSize: "0.72rem", color: "var(--gray-500)", marginTop: "0.25rem" }}>
+                      {cs === "gray" ? `${seat.name} appears offline` : `${seat.name} seems to have connection issues`}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
 
           <div className="panel" style={{ padding: "1.75rem", display: "flex", alignItems: "center", justifyContent: "center", gap: "2rem", flexWrap: "wrap", marginBottom: "2rem" }}>
@@ -1261,10 +1476,26 @@ function RoomView({
   );
 }
 
-function SeatLabel({ label, count, active, accent, speaking }: { label: string; count: number; active: boolean; accent: "green" | "pink"; speaking?: boolean }) {
+const CONN_DOT_COLOR: Record<ConnStatus, string> = { green: "var(--green)", yellow: "var(--gold)", gray: "var(--gray-600)" };
+
+function SeatLabel({ label, count, active, accent, speaking, connectionStatus }: {
+  label: string;
+  count: number;
+  active: boolean;
+  accent: "green" | "pink";
+  speaking?: boolean;
+  connectionStatus?: ConnStatus;
+}) {
   return (
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
       <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+        {connectionStatus && (
+          <span
+            title={connectionStatus === "green" ? "Online" : connectionStatus === "yellow" ? "Slow connection" : "Offline"}
+            style={{ width: 7, height: 7, borderRadius: "50%", background: CONN_DOT_COLOR[connectionStatus], display: "inline-block", flexShrink: 0 }}
+            className={connectionStatus === "green" ? "pulse-dot" : undefined}
+          />
+        )}
         <span style={{ fontWeight: 600, color: "var(--gray-200)" }}>{label}</span>
         {speaking && (
           <span title="Speaking" className="pulse-dot" style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--green)", display: "inline-block", flexShrink: 0 }} />
