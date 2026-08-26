@@ -2,9 +2,28 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 import { supabase } from "./supabase";
 
-const ICE_SERVERS: RTCIceServer[] = [
-  { urls: "stun:stun.l.google.com:19302" },
-  { urls: "stun:stun1.l.google.com:19302" },
+const ICE_SERVERS = [
+  { urls: "stun:stun.relay.metered.ca:80" },
+  {
+    urls: "turn:global.relay.metered.ca:80",
+    username: "bbc0a7f31e50eb78a5b3b183",
+    credential: "lb8QzVNuNk4tCdFb",
+  },
+  {
+    urls: "turn:global.relay.metered.ca:80?transport=tcp",
+    username: "bbc0a7f31e50eb78a5b3b183",
+    credential: "lb8QzVNuNk4tCdFb",
+  },
+  {
+    urls: "turn:global.relay.metered.ca:443",
+    username: "bbc0a7f31e50eb78a5b3b183",
+    credential: "lb8QzVNuNk4tCdFb",
+  },
+  {
+    urls: "turns:global.relay.metered.ca:443?transport=tcp",
+    username: "bbc0a7f31e50eb78a5b3b183",
+    credential: "lb8QzVNuNk4tCdFb",
+  },
 ];
 
 type SigMsg =
