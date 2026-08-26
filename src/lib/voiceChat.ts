@@ -2,6 +2,26 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 import { supabase } from "./supabase";
 
+// Unlock browser autoplay policy on first user interaction
+function installAutoplayUnlock() {
+  if (typeof window === "undefined") return;
+  const unlock = () => {
+    try {
+      const actx = new AudioContext();
+      const buf = actx.createBuffer(1, 1, 22050);
+      const src = actx.createBufferSource();
+      src.buffer = buf;
+      src.connect(actx.destination);
+      src.start(0);
+      actx.close();
+    } catch { /* ignore */ }
+    document.removeEventListener("click", unlock, true);
+    document.removeEventListener("touchstart", unlock, true);
+  };
+  document.addEventListener("click", unlock, true);
+  document.addEventListener("touchstart", unlock, true);
+}
+
 const ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
@@ -188,6 +208,7 @@ export function useVoiceChat(
         document.body.appendChild(audio);
       }
       audio.srcObject = stream;
+      audio.play().catch(() => {});
       startSpeakDetect(peerId, stream);
     };
 
@@ -364,6 +385,11 @@ export function useVoiceChat(
     ctx.current.micMuted = newMuted;
     setMicMuted(newMuted);
   // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Unlock autoplay on first user interaction so remote audio plays without clicks
+  useEffect(() => {
+    installAutoplayUnlock();
   }, []);
 
   // Cleanup on unmount
